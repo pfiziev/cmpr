@@ -8,11 +8,11 @@ import operator
 import pickle
 import itertools
 import gc
+import traceback
 
 from utils import open_file, echo, n_combinations, smooth
 from metric import *
 
-MAX_CACHE_SIZE = 1000000
 
 
 def compress_segmentations_into_non_repeating_windows(chrom_segmentations_A, chrom_segmentations_B, max_min_window):
@@ -33,8 +33,12 @@ def compress_segmentations_into_non_repeating_windows(chrom_segmentations_A, chr
         window_start = max(0, bin_idx - max_min_window)
         window_end = min(chrom_length, bin_idx + max_min_window + 1)
 
-        a_window = tuple(seg[i] for i in xrange(window_start, window_end) for seg in chrom_segmentations_A)
-        b_window = tuple(seg[i] for i in xrange(window_start, window_end) for seg in chrom_segmentations_B)
+        a_window = tuple(s for c in sorted(set(tuple(seg[i] for seg in chrom_segmentations_A) for i in xrange(window_start, window_end))) for s in c)
+        b_window = tuple(s for c in sorted(set(tuple(seg[i] for seg in chrom_segmentations_B) for i in xrange(window_start, window_end))) for s in c)
+        # b_window = tuple(seg[i] for i in xrange(window_start, window_end) for seg in chrom_segmentations_B)
+
+        # a_window = tuple(seg[i] for i in xrange(window_start, window_end) for seg in chrom_segmentations_A)
+        # b_window = tuple(seg[i] for i in xrange(window_start, window_end) for seg in chrom_segmentations_B)
 
         if a_window != prev_a_windows or b_window != prev_b_windows:
 
@@ -54,7 +58,7 @@ def compress_segmentations_into_non_repeating_windows(chrom_segmentations_A, chr
     return non_repating_windows, sorted(unique_windows, key=lambda k: unique_windows_indices[k])
 
 
-def expand_non_overlapping_windows(scores, state_transitions, chrom_segmentations_windows, background_chunk=False):
+def expand_non_overlapping_windows(chrom, scores, state_transitions, chrom_segmentations_windows, background_chunk=False):
 
     total_chrom_length = sum(c for _, c in chrom_segmentations_windows)
     score_types = scores[0].keys()
@@ -83,8 +87,9 @@ def expand_non_overlapping_windows(scores, state_transitions, chrom_segmentation
 
             bin_idx += 1
 
-    return expanded_scores if background_chunk else (expanded_scores, expanded_state_transitions)
+    return expanded_scores if background_chunk else (chrom, expanded_scores, expanded_state_transitions)
 
+MAX_CACHE_SIZE = 10000
 
 def get_overall_and_per_state_diff_score(chrom,
                                          group_A_segmentations,
@@ -102,8 +107,6 @@ def get_overall_and_per_state_diff_score(chrom,
         echo('Chromosome:', chrom)
 
     cache_miss = 0
-    scores_cache = {}
-    closest_transition_cache = {}
 
     datasets_A = sorted(group_A_segmentations)
     datasets_B = sorted(group_B_segmentations)
@@ -132,6 +135,9 @@ def get_overall_and_per_state_diff_score(chrom,
     chrom_length = len(chrom_segmentations_windows)
     scores = [None] * chrom_length # dict((k, [0.0] * chrom_length) for k in [OVERALL_SCORE] + (states if compute_per_state_scores else []))
 
+    scores_cache = [None] * len(unique_windows)
+    closest_transition_cache = [None] * len(unique_windows)
+
     state_transitions = None
     if not background_chunk:
         state_transitions = [None] * chrom_length
@@ -142,7 +148,7 @@ def get_overall_and_per_state_diff_score(chrom,
 
         a_bins, b_bins, a_window, b_window = unique_windows[window_idx]
 
-        if window_idx not in scores_cache:
+        if scores_cache[window_idx] is None:
             cache_miss += 1
 
             # get the posterior probabilities for group A by summing up the
@@ -183,7 +189,7 @@ def get_overall_and_per_state_diff_score(chrom,
                 closest_state_A, closest_state_B = min(state_pairs,
                                                        key=lambda (_s1, _s2):
                                                        KL(flat_prob_dict,
-                                                           pure_state_transitions[_s1][_s2][STATE_DISTRIBUTION]))
+                                                          pure_state_transitions[_s1][_s2][STATE_DISTRIBUTION]))
 
                 closest_transition_cache[window_idx] = (closest_state_A, closest_state_B, a_bins, b_bins)
 
@@ -201,7 +207,7 @@ def get_overall_and_per_state_diff_score(chrom,
     if not background_chunk:
         echo(chrom_length, len(scores_cache), 100 * (cache_miss / float(chrom_length)), cache_miss)
 
-    return expand_non_overlapping_windows(scores, state_transitions, chrom_segmentations_windows, background_chunk)
+    return expand_non_overlapping_windows(chrom, scores, state_transitions, chrom_segmentations_windows, background_chunk)
 
 
 
@@ -324,17 +330,17 @@ def store_output(chrom,
         start += BIN_SIZE
 
 
-def compute_background_scores_by_shuffling_segmentations(group_A_segmentations,
-                                                         group_B_segmentations,
-                                                         random_chunks,
-                                                         states,
-                                                         metric_A,
-                                                         metric_B,
-                                                         n_perm=100,
-                                                         to_smooth=False,
-                                                         max_min_window=0,
-                                                         compute_per_state_scores=False
-                                                         ):
+def _compute_background_scores_by_shuffling_segmentations(group_A_segmentations,
+                                                          group_B_segmentations,
+                                                          random_chunks,
+                                                          states,
+                                                          metric_A,
+                                                          metric_B,
+                                                          n_perm=100,
+                                                          to_smooth=False,
+                                                          max_min_window=0,
+                                                          compute_per_state_scores=False
+                                                          ):
 
     # longest_chromosome = max(chromosomes, key=lambda c: group_A_segmentations.values()[0][c][-1][1])
     # print 'Longest chromosome:', longest_chromosome
@@ -424,6 +430,7 @@ def compute_background_scores_by_shuffling_segmentations(group_A_segmentations,
 
         # iterate over the bins in both segmentation groups
         # for chrom in random.sample(chromosomes, 2):
+
         for chrom in random_chunks:
 
             chrom_segmentations_A = [chrom_segmentation_to_list(shuffled_A_segmentations[d][chrom], BIN_SIZE) for d in shuffled_A_datasets]
@@ -466,6 +473,215 @@ def compute_background_scores_by_shuffling_segmentations(group_A_segmentations,
 
     return dict((score_type, sorted(background_scores[score_type].items())) for score_type in background_scores)
 
+
+def compute_background_scores_by_shuffling_segmentations(group_A_segmentations,
+                                                         group_B_segmentations,
+                                                         random_chunks,
+                                                         states,
+                                                         metric_A,
+                                                         metric_B,
+                                                         n_perm=100,
+                                                         to_smooth=False,
+                                                         max_min_window=0,
+                                                         compute_per_state_scores=False,
+                                                         n_threads=1
+                                                         ):
+
+    # longest_chromosome = max(chromosomes, key=lambda c: group_A_segmentations.values()[0][c][-1][1])
+    # print 'Longest chromosome:', longest_chromosome
+
+    n_A_segs = len(group_A_segmentations)
+    n_B_segs = len(group_B_segmentations)
+
+    A_segs_keys = tuple(sorted(group_A_segmentations.keys()))
+    B_segs_keys = tuple(sorted(group_B_segmentations.keys()))
+
+    # make the union of the two groups
+    all_seg_keys = tuple(k for seg_keys in [A_segs_keys, B_segs_keys] for k in seg_keys)
+    all_segs = dict(group_A_segmentations.items() + group_B_segmentations.items())
+    all_metrics = dict(metric_A.items() + metric_B.items())
+
+    if n_A_segs == n_B_segs:
+        n_comb = n_combinations(len(all_seg_keys), n_A_segs) / 2 - 1
+    else:
+        n_comb = n_combinations(len(all_seg_keys), n_A_segs) - 1
+
+    def shuffled_samples(n_perm):
+
+        seen = set()
+
+        if n_comb > n_perm:
+
+            yield A_segs_keys, B_segs_keys
+            seen = set([(A_segs_keys, B_segs_keys),
+                        (B_segs_keys, A_segs_keys)])
+            n_perm -= 1
+
+            for _ in xrange(n_perm):
+
+                shuffled_A_segs = tuple(sorted(random.sample(all_seg_keys, n_A_segs)))
+                shuffled_B_segs = tuple(sorted(s for s in all_seg_keys if s not in shuffled_A_segs))
+
+                while (shuffled_A_segs, shuffled_B_segs) in seen and (shuffled_B_segs, shuffled_A_segs) in seen:
+                    shuffled_A_segs = tuple(sorted(random.sample(all_seg_keys, n_A_segs)))
+                    shuffled_B_segs = tuple(sorted(s for s in all_seg_keys if s not in shuffled_A_segs))
+
+                seen.add((shuffled_A_segs, shuffled_B_segs))
+                seen.add((shuffled_B_segs, shuffled_A_segs))
+
+                yield shuffled_A_segs, shuffled_B_segs
+
+        else:
+            # generate all shuffled samples
+            for shuffled_A_segs in combinations(all_seg_keys, n_A_segs):
+                shuffled_B_segs = tuple(s for s in all_seg_keys if s not in shuffled_A_segs)
+
+                if (shuffled_A_segs, shuffled_B_segs) in seen or (shuffled_B_segs, shuffled_A_segs) in seen:
+                    continue
+
+                seen.add((shuffled_A_segs, shuffled_B_segs))
+                seen.add((shuffled_B_segs, shuffled_A_segs))
+
+                yield shuffled_A_segs, shuffled_B_segs
+
+    background_scores = dict((k, {}) for k in [OVERALL_SCORE] + (states if compute_per_state_scores else []))
+
+    if n_threads == 1:
+        _map = itertools.imap
+    else:
+        pool = Pool(processes=n_threads)
+        _map = pool.map
+
+    for combo_background_scores in _map(worker,
+                                        [(process_shuffled_combo,
+                                          combo_no,
+                                          shuffled_A_datasets,
+                                          dict((dataset, all_segs[dataset]) for dataset in shuffled_A_datasets),
+                                          dict((dataset, all_metrics[dataset]) for dataset in shuffled_A_datasets),
+
+                                          shuffled_B_datasets,
+                                          dict((dataset, all_segs[dataset]) for dataset in shuffled_B_datasets),
+                                          dict((dataset, all_metrics[dataset]) for dataset in shuffled_B_datasets),
+
+                                          random_chunks,
+                                          BIN_SIZE,
+                                          states,
+                                          compute_per_state_scores,
+                                          max_min_window,
+                                          to_smooth)
+                                         for combo_no, (shuffled_A_datasets, shuffled_B_datasets) in enumerate(shuffled_samples(n_perm))]):
+
+        for score_type in combo_background_scores:
+            for s in combo_background_scores[score_type]:
+                if s not in background_scores[score_type]:
+                    background_scores[score_type][s] = 0
+                background_scores[score_type][s] += combo_background_scores[score_type][s]
+
+    if n_threads > 1:
+        pool.close()
+
+    for score_type in background_scores:
+        total_regions = sum(background_scores[score_type].itervalues())
+        total_so_far = 0
+
+        for s in sorted(background_scores[score_type], reverse=True):
+            total_so_far += background_scores[score_type][s]
+            background_scores[score_type][s] = total_so_far / float(total_regions)
+
+    return dict((score_type, sorted(background_scores[score_type].items())) for score_type in background_scores)
+
+
+def worker(args):
+    func = None
+
+    try:
+        func = args[0]
+        return func(*args[1:])
+
+    except Exception, e:
+        print 'Caught exception in output worker thread (combo_on: %s):' % str(args[1])
+        print func
+
+        echo(e)
+        if hasattr(open_log, 'logfile'):
+            traceback.print_exc(file=open_log.logfile)
+        traceback.print_exc()
+
+        print
+        raise e
+
+
+def process_shuffled_combo( combo_no,
+                            shuffled_A_datasets,
+                            shuffled_A_segmentations,
+                            shuffled_metric_A,
+
+                            shuffled_B_datasets,
+                            shuffled_B_segmentations,
+                            shuffled_metric_B,
+
+                            random_chunks,
+                            BIN_SIZE,
+                            states,
+                            compute_per_state_scores,
+                            max_min_window,
+                            to_smooth):
+
+    echo('Combo no:', combo_no)
+
+    print 'Shuffled A:', shuffled_A_datasets
+    print 'Shuffled B:', shuffled_B_datasets
+    print
+
+    # shuffled_metric_A = learn_metric(shuffled_A_segmentations, states, BIN_SIZE)
+    # print_metric(shuffled_metric_A)
+    #
+    # shuffled_metric_B = learn_metric(shuffled_B_segmentations, states, BIN_SIZE)
+
+    # print_metric(shuffled_metric_B)
+    # print '*' * 50
+    # print_average_metric(states, shuffled_metric_A, shuffled_metric_B)
+    # print '*' * 50
+
+    # iterate over the bins in both segmentation groups
+    # for chrom in random.sample(chromosomes, 2):
+
+    background_scores = dict((k, {}) for k in [OVERALL_SCORE] + (states if compute_per_state_scores else []))
+
+    for chrom in sorted(random_chunks):
+        # echo(combo_no, chrom)
+        chrom_segmentations_A = [chrom_segmentation_to_list(shuffled_A_segmentations[d][chrom], BIN_SIZE) for d in shuffled_A_datasets]
+        chrom_segmentations_B = [chrom_segmentation_to_list(shuffled_B_segmentations[d][chrom], BIN_SIZE) for d in shuffled_B_datasets]
+
+        for chunk_start, chunk_end in random_chunks[chrom]:
+            # echo(combo_no, chunk_start, chunk_end)
+            chunk_segmentations_A = dict((d, seg[chunk_start:chunk_end]) for d, seg in izip(shuffled_A_segmentations, chrom_segmentations_A))
+            chunk_segmentations_B = dict((d, seg[chunk_start:chunk_end]) for d, seg in izip(shuffled_B_segmentations, chrom_segmentations_B))
+
+            chunk_scores = get_overall_and_per_state_diff_score(chrom,
+                                                                chunk_segmentations_A,
+                                                                shuffled_metric_A,
+                                                                chunk_segmentations_B,
+                                                                shuffled_metric_B,
+                                                                BIN_SIZE,
+                                                                states,
+                                                                None,
+                                                                compute_per_state_scores,
+                                                                max_min_window,
+                                                                background_chunk=True)
+
+            if to_smooth:
+                chunk_scores = dict((score_type, smooth(chunk_scores[score_type])) for score_type in chunk_scores)
+
+            for score_type in background_scores:
+                for s in chunk_scores[score_type]:
+                    abs_score = abs(s)
+                    if abs_score not in background_scores[score_type]:
+                        background_scores[score_type][abs_score] = 0
+
+                    background_scores[score_type][abs_score] += 1
+
+    return background_scores
 
 def compute_foreground_scores(group_A_segmentations,
                               group_B_segmentations,
@@ -537,8 +753,8 @@ def compute_background_model(args,
     BIN_SIZE = args.bin_size
 
     RANDOM_CHUNK_LENGTH = 1000000 / BIN_SIZE
-    N_RANDOM_CHUNKS = 5
-    MAX_N_SHUFFLED_SAMPLES = 10
+    N_RANDOM_CHUNKS = 100
+    MAX_N_SHUFFLED_SAMPLES = 100
 
     chrom_lengths = [group_A_segmentations.values()[0][chrom][-1][1] / BIN_SIZE for chrom in chromosomes]
     total_genome_length = sum(chrom_lengths)
@@ -596,7 +812,8 @@ def compute_background_model(args,
                                                                                  n_perm=MAX_N_SHUFFLED_SAMPLES,
                                                                                  compute_per_state_scores=args.per_state_scores,
                                                                                  to_smooth=args.smooth,
-                                                                                 max_min_window=args.max_min_window)
+                                                                                 max_min_window=args.max_min_window,
+                                                                                 n_threads=args.n_threads)
 
     foreground_scores = compute_foreground_scores(group_A_segmentations,
                                                   group_B_segmentations,
@@ -679,7 +896,7 @@ if __name__ == '__main__':
     parser.add_argument('--chrom-hmm-model-path', help='path to the ChromHMM model to use for shuffled marks')
 
     parser.add_argument('-s', '--smooth', action='store_true', help='smooth signal')
-    # parser.add_argument('-p', '--n-threads', type=int, help='number of threads to use', default=1)
+    parser.add_argument('-p', '--n-threads', type=int, help='number of threads to use', default=1)
 
     parser.add_argument('--max-min-window', type=int, help='pick the maximum distance between the two most similar bins within this window', default=0)
 
@@ -687,7 +904,7 @@ if __name__ == '__main__':
     # parser.add_argument('--use-closest-rep', action='store_true', help='use only closest replicate to learn the metric')
     # parser.add_argument('--all-for-null', action='store_true', default=False, help='include the original combo in the background model')
     parser.add_argument('--store-scores', action='store_true', default=False, help='store foreground and background scores in a pickle file')
-    parser.add_argument('--output-changes', action='store_true', default=False, help='output significant pairwise changes')
+    # parser.add_argument('--output-changes', action='store_true', default=False, help='output significant pairwise changes')
 
     args = parser.parse_args()
 
@@ -695,18 +912,15 @@ if __name__ == '__main__':
         parser.print_help()
         exit(1)
 
+    open_log(args.output + '.log')
     BIN_SIZE = args.bin_size
     echo('cmd:', ' '.join(sys.argv))
     for arg in sorted(vars(args)):
         echo(arg , '=', getattr(args, arg))
 
     random.seed(36830804669286)
-    # n_threads = args.n_threads
-    max_min_window = args.max_min_window
-    output_pairwise_changes = args.output_changes
 
-    # if args.use_closest_rep:
-    #     learn_metric_from_all_replicates = _learn_metric
+    max_min_window = args.max_min_window
 
     compute_per_state_scores = args.per_state_scores
 
@@ -757,18 +971,36 @@ if __name__ == '__main__':
 
     pure_state_transitions = generate_pure_state_transitions(states, metric_A, metric_B)
     # chromosomes = ['chrX']
+    if args.n_threads > 1:
+        pool = Pool(args.n_threads)
+        _map = pool.map
+    else:
+        _map = itertools.imap
 
-    for chrom in chromosomes:
-        signal, state_transitions = get_overall_and_per_state_diff_score(chrom,
-                                                                         group_A_segmentations,
-                                                                         metric_A,
-                                                                         group_B_segmentations,
-                                                                         metric_B,
-                                                                         BIN_SIZE,
-                                                                         states,
-                                                                         pure_state_transitions,
-                                                                         compute_per_state_scores,
-                                                                         max_min_window)
+    for chrom, signal, state_transitions in _map(worker,
+                                                 [(get_overall_and_per_state_diff_score,
+                                                   _chrom,
+                                                   dict((d, {_chrom: group_A_segmentations[d][_chrom]}) for d in group_A_segmentations),
+                                                   metric_A,
+                                                   dict((d, {_chrom: group_B_segmentations[d][_chrom]}) for d in group_B_segmentations),
+                                                   metric_B,
+                                                   BIN_SIZE,
+                                                   states,
+                                                   pure_state_transitions,
+                                                   compute_per_state_scores,
+                                                   max_min_window) for _chrom in chromosomes]):
+
+    # for chrom in chromosomes:
+    #     signal, state_transitions = get_overall_and_per_state_diff_score(chrom,
+    #                                                                      group_A_segmentations,
+    #                                                                      metric_A,
+    #                                                                      group_B_segmentations,
+    #                                                                      metric_B,
+    #                                                                      BIN_SIZE,
+    #                                                                      states,
+    #                                                                      pure_state_transitions,
+    #                                                                      compute_per_state_scores,
+    #                                                                      max_min_window)
 
         if args.smooth:
             smooth_dict(signal)
@@ -782,9 +1014,13 @@ if __name__ == '__main__':
                        out_summary_files,
                        span=BIN_SIZE)
 
+        echo('Storing wiggle')
         store_dict_wig(chrom, signal, out_signal_files, span=BIN_SIZE)
 
         gc.collect()
+
+    if args.n_threads > 1:
+        pool.close()
 
     for score_type in out_signal_files:
         out_signal_files[score_type].close()
@@ -869,3 +1105,4 @@ if __name__ == '__main__':
     # plt.savefig(out_fname + '_score_histogram.png', dpi=300)
 
     echo('Done')
+    close_log()

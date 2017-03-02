@@ -68,7 +68,6 @@ def compute_background_scores_by_shuffling_marks(bin_directory,
                                                  max_min_window=0,
                                                  to_smooth=False):
 
-    marks = None
     chrom_lengths = {}
     ct_chrom_fnames = {}
     celltypes = set(re.sub(r'_(\d+)$', '', os.path.split(sf)[1].split('_segments')[0]) for sf in seg_fnames)
@@ -153,8 +152,6 @@ def compute_background_scores_by_shuffling_marks(bin_directory,
         for s in sorted(background_model[score_type], reverse=True):
             total_so_far += background_model[score_type][s]
             background_model[score_type][s] = total_so_far / float(total_regions)
-
-        background_model[score_type] = sorted(background_model[score_type].items())
 
     return dict((score_type, sorted(background_model[score_type].items())) for score_type in background_model)
 
