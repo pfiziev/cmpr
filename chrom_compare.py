@@ -550,7 +550,7 @@ def compute_background_scores_by_shuffling_segmentations(group_A_segmentations,
         _map = itertools.imap
     else:
         pool = Pool(processes=n_threads)
-        _map = pool.map
+        _map = pool.imap_unordered
 
     for combo_background_scores in _map(worker,
                                         [(process_shuffled_combo,
@@ -655,8 +655,8 @@ def process_shuffled_combo( combo_no,
 
         for chunk_start, chunk_end in random_chunks[chrom]:
             # echo(combo_no, chunk_start, chunk_end)
-            chunk_segmentations_A = dict((d, seg[chunk_start:chunk_end]) for d, seg in izip(shuffled_A_segmentations, chrom_segmentations_A))
-            chunk_segmentations_B = dict((d, seg[chunk_start:chunk_end]) for d, seg in izip(shuffled_B_segmentations, chrom_segmentations_B))
+            chunk_segmentations_A = dict((d, seg[chunk_start:chunk_end]) for d, seg in izip(shuffled_A_datasets, chrom_segmentations_A))
+            chunk_segmentations_B = dict((d, seg[chunk_start:chunk_end]) for d, seg in izip(shuffled_B_datasets, chrom_segmentations_B))
 
             chunk_scores = get_overall_and_per_state_diff_score(chrom,
                                                                 chunk_segmentations_A,
@@ -821,8 +821,8 @@ def compute_background_model(args,
                                                   states,
                                                   metric_A,
                                                   metric_B,
-                                                  to_smooth=False,
-                                                  max_min_window=0,
+                                                  to_smooth=args.smooth,
+                                                  max_min_window=args.max_min_window,
                                                   compute_per_state_scores=args.per_state_scores)
 
     background_model = dict((k, {0.0: 1}) for k in [OVERALL_SCORE] + (states if compute_per_state_scores else []))
@@ -839,18 +839,14 @@ def compute_background_model(args,
         score_idx = 0
         bgr_idx = 0
 
-        while True:
-
-            # if we reached the end of all_scores, then nothing is significant
-            if score_idx == len(all_scores):
-                break
+        while score_idx < len(all_scores):
 
             # find how many background scores are greater than the current real score
             while bgr_idx < len(background_scores[score_type]) and background_scores[score_type][bgr_idx][0] < all_scores[score_idx][0]:
                 bgr_idx += 1
 
             if bgr_idx == len(background_scores[score_type]):
-                false_positives = 0
+                false_positives = 1
             else:
                 false_positives = background_scores[score_type][bgr_idx][1]
 
@@ -973,7 +969,7 @@ if __name__ == '__main__':
     # chromosomes = ['chrX']
     if args.n_threads > 1:
         pool = Pool(args.n_threads)
-        _map = pool.map
+        _map = pool.imap_unordered
     else:
         _map = itertools.imap
 
@@ -1005,7 +1001,7 @@ if __name__ == '__main__':
         if args.smooth:
             smooth_dict(signal)
 
-        echo('Storing output files')
+        echo('Storing output files:', chrom)
 
         store_dict_bed(chrom,
                        state_transitions,
@@ -1014,7 +1010,7 @@ if __name__ == '__main__':
                        out_summary_files,
                        span=BIN_SIZE)
 
-        echo('Storing wiggle')
+        echo('Storing wiggle:', chrom)
         store_dict_wig(chrom, signal, out_signal_files, span=BIN_SIZE)
 
         gc.collect()
@@ -1024,6 +1020,11 @@ if __name__ == '__main__':
 
     for score_type in out_signal_files:
         out_signal_files[score_type].close()
+        out_summary_files[score_type].close()
+
+
+
+
 
 
     # with open_file(out_fname + '.summary.bed.gz', 'w') as out_states_f:
