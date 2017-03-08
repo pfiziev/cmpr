@@ -47,7 +47,7 @@ def _learn_metric(segmentations, states, BIN_SIZE, other_group=None):
 
     return metrics
 
-def learn_metric_from_all_replicates(segmentations, states, BIN_SIZE, other_group=None):
+def learn_metric_from_all_replicates(segmentations, states, BIN_SIZE):
     echo('Using all replicates to learn the metric')
     PSEUDO_COUNT = 1
 
@@ -234,7 +234,7 @@ P_VALUE = 'p-value'
 PSEUDO_COUNT = 10
 
 def generate_pure_state_transitions(states, metric_A, metric_B):
-    p = .9
+
     pure_state_transitions = {}
     for s1 in states:
         pure_state_transitions[s1] = {}

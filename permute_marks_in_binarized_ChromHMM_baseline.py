@@ -7,7 +7,7 @@ import sys, random
 import tempfile
 import operator
 import re
-from chrom_compare import get_overall_and_per_state_diff_score
+from chrom_compare_baseline import get_overall_and_per_state_diff_score_emissions
 from metric import *
 from utils import echo, read_segmentations, filter_chroms, smooth
 from subprocess import call
@@ -66,6 +66,7 @@ def compute_background_scores_by_shuffling_marks(bin_directory,
                                                  n_perms=100,
                                                  compute_per_state_scores=False,
                                                  max_min_window=0,
+                                                 emissions=None,
                                                  to_smooth=False):
 
     chrom_lengths = {}
@@ -138,6 +139,7 @@ def compute_background_scores_by_shuffling_marks(bin_directory,
                                        BIN_SIZE,
                                        compute_per_state_scores,
                                        max_min_window,
+                                       emissions,
                                        to_smooth)
 
         clean_up_directory(out_dir)
@@ -163,6 +165,7 @@ def process_shuffled_segmentations(n_group_A,
                                    BIN_SIZE,
                                    compute_per_state_scores,
                                    max_min_window,
+                                   emissions=None,
                                    to_smooth=False):
 
     seg_fnames = sorted([os.path.join(out_dir, f) for f in os.listdir(out_dir) if f.endswith('_segments.bed')])
@@ -194,14 +197,12 @@ def process_shuffled_segmentations(n_group_A,
         chrom_segmentations_A = dict((d, chrom_segmentation_to_list(group_A_segmentations[d][chrom], BIN_SIZE)) for d in group_A_seg_fnames)
         chrom_segmentations_B = dict((d, chrom_segmentation_to_list(group_B_segmentations[d][chrom], BIN_SIZE)) for d in group_B_seg_fnames)
 
-        chunk_scores = get_overall_and_per_state_diff_score(chrom,
+        chunk_scores = get_overall_and_per_state_diff_score_emissions(chrom,
                                                             chrom_segmentations_A,
-                                                            metric_A,
                                                             chrom_segmentations_B,
-                                                            metric_B,
+                                                            emissions,
                                                             BIN_SIZE,
                                                             states,
-                                                            None,
                                                             compute_per_state_scores,
                                                             max_min_window,
                                                             background_chunk=True)
