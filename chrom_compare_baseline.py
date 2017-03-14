@@ -2,6 +2,7 @@ import argparse
 from itertools import izip, combinations
 from multiprocessing import Pool
 import os
+import pprint
 import random
 import sys
 import operator
@@ -118,6 +119,109 @@ def get_prob_vector_marks(bins, datasets, metric, states):
     return probs
 
 
+def read_ChromHMM_posteriors(chrom, posteriors_dir, datasets):
+    celltypes = sorted([os.path.split(d)[1].split('_segments')[0] for d in datasets])
+
+    signal = {}
+
+    for ct in celltypes:
+        echo('Reading signal for:', ct, chrom)
+        fname = os.path.join(posteriors_dir, ct + '_' + chrom + '_posterior.txt.gz')
+
+        with open_file(fname) as in_f:
+            n_bins = len(list(in_f)) - 2
+
+        with open_file(fname) as in_f:
+            ct, chrom = in_f.readline().strip().split()
+
+            if ct not in signal:
+                signal[ct] = {}
+
+            states = in_f.readline().strip().split()
+
+            for s in states:
+                signal[ct][s] = [0] * n_bins
+
+            for i, l in enumerate(in_f):
+                for s, v in izip(states, map(float, l.strip().split())):
+                    signal[ct][s][i] = v
+                if i < 2:
+                    print dict((s, signal[ct][s][i]) for s in states)
+
+    return signal
+
+
+def compute_posteriors_diff(chrom_posteriors_A, chrom_posteriors_B, compute_per_state_scores):
+    n_bins = len(chrom_posteriors_A.values()[0].values()[0])
+    states = sorted(chrom_posteriors_A.values()[0])
+    signal = dict((score_type, [0] * n_bins) for score_type in [OVERALL_SCORE] + (states if compute_per_state_scores else []))
+
+    for bin_i in xrange(n_bins):
+        p_A = dict((s, mean([chrom_posteriors_A[ct][s][bin_i] for ct in chrom_posteriors_A])) for s in states)
+        p_B = dict((s, mean([chrom_posteriors_B[ct][s][bin_i] for ct in chrom_posteriors_B])) for s in states)
+
+        def pseudo(p):
+            PSEUDO = 0.001
+            total = 1 + PSEUDO * len(p)
+            return dict((s, (p[s] + PSEUDO) / total) for s in p)
+
+        # if bin_i < 2:
+        #     print pseudo(p_A)
+        #     print pseudo(p_B)
+        #     print
+
+        signal[OVERALL_SCORE][bin_i] = hellinger_distance(p_A, p_B)
+        # signal[OVERALL_SCORE][bin_i] = symmetric_KL_divergence(pseudo(p_A), pseudo(p_B))
+        if compute_per_state_scores:
+            for s in states:
+                signal[s][bin_i] = p_A[s] - p_B[s]
+
+    return signal
+
+def get_overall_and_per_state_diff_score_posteriors(chrom,
+                                                    group_A_segmentations,
+                                                    group_B_segmentations,
+                                                    posteriors_dir,
+                                                    BIN_SIZE,
+                                                    compute_per_state_scores,
+                                                    max_min_window):
+    datasets_A = sorted(group_A_segmentations)
+    datasets_B = sorted(group_B_segmentations)
+
+    chrom_posteriors_A = read_ChromHMM_posteriors(chrom, posteriors_dir, datasets_A)
+    chrom_posteriors_B = read_ChromHMM_posteriors(chrom, posteriors_dir, datasets_B)
+    signal = compute_posteriors_diff(chrom_posteriors_A, chrom_posteriors_B, compute_per_state_scores)
+    state_transitions = []
+    for (a_bins, b_bins) in izip(izip(*[iterstate(group_A_segmentations[d][chrom], BIN_SIZE) for d in datasets_A]),
+                                 izip(*[iterstate(group_B_segmentations[d][chrom], BIN_SIZE) for d in datasets_B])):
+        state_transitions.append(('X', 'X', a_bins, b_bins))
+
+    return chrom, signal, state_transitions
+
+
+
+def get_overall_and_per_state_diff_score_signal( chrom,
+                                                 group_A_segmentations,
+                                                 group_B_segmentations,
+                                                 signal_dir,
+                                                 BIN_SIZE,
+                                                 LOG2RPKM,
+                                                 total_reads_per_mark,
+                                                 compute_per_state_scores,
+                                                 max_min_window):
+
+    datasets_A = sorted(group_A_segmentations)
+    datasets_B = sorted(group_B_segmentations)
+
+    chrom_signal_A = read_ChromHMM_signal(chrom, signal_dir, datasets_A, total_reads_per_mark, BIN_SIZE, LOG2RPKM)
+    chrom_signal_B = read_ChromHMM_signal(chrom, signal_dir, datasets_B, total_reads_per_mark, BIN_SIZE, LOG2RPKM)
+    signal = compute_signal_diff(chrom_signal_A, chrom_signal_B, compute_per_state_scores=compute_per_state_scores)
+    state_transitions = []
+    for (a_bins, b_bins) in izip(izip(*[iterstate(group_A_segmentations[d][chrom], BIN_SIZE) for d in datasets_A]),
+                                 izip(*[iterstate(group_B_segmentations[d][chrom], BIN_SIZE) for d in datasets_B])):
+        state_transitions.append(('X', 'X', a_bins, b_bins))
+
+    return chrom, signal, state_transitions
 
 def get_overall_and_per_state_diff_score_emissions(chrom,
                                          group_A_segmentations,
@@ -357,11 +461,15 @@ def compute_background_scores_by_shuffling_segmentations(group_A_segmentations,
                                                          random_chunks,
                                                          states,
                                                          emissions=None,
+                                                         signal_dir=None,
+                                                         total_reads_per_mark=None,
                                                          n_perm=100,
                                                          to_smooth=False,
                                                          max_min_window=0,
                                                          compute_per_state_scores=False,
-                                                         n_threads=1
+                                                         n_threads=1,
+                                                         BIN_SIZE=None,
+                                                         LOG2RPKM=None
                                                          ):
 
     # longest_chromosome = max(chromosomes, key=lambda c: group_A_segmentations.values()[0][c][-1][1])
@@ -438,9 +546,12 @@ def compute_background_scores_by_shuffling_segmentations(group_A_segmentations,
                                           dict((dataset, all_segs[dataset]) for dataset in shuffled_B_datasets),
 
                                           emissions,
+                                          signal_dir,
+                                          total_reads_per_mark,
 
                                           random_chunks,
                                           BIN_SIZE,
+                                          LOG2RPKM,
                                           states,
                                           compute_per_state_scores,
                                           max_min_window,
@@ -487,6 +598,69 @@ def worker(args):
         raise e
 
 
+def read_ChromHMM_signal(chrom, signal_dir, datasets, total_reads_per_mark, BIN_SIZE, LOG2RPKM):
+    echo('LOG2RKM:', LOG2RPKM)
+    celltypes = sorted([re.sub(r'_(\d+)$', '', os.path.split(d)[1].split('_segments')[0]) for d in datasets])
+    # celltypes = [re.sub(r'_(\d+)_segments.bed(.gz)?', '', os.path.split(d)[1]) for d in datasets]
+    signal = {}
+
+    for ct in celltypes:
+        echo('Reading signal for:', ct, chrom)
+        fname = os.path.join(signal_dir, ct + '_' + chrom + '_signal.txt.gz')
+
+        with open_file(fname) as in_f:
+            n_bins = len(list(in_f)) - 2
+
+        with open_file(fname) as in_f:
+            ct, chrom = in_f.readline().strip().split()
+
+            if ct not in signal:
+                signal[ct] = {}
+
+            # if chrom not in signal[ct]:
+            #     signal[ct][chrom] = {}
+
+            marks = in_f.readline().strip().split()
+
+            for m in marks:
+                # signal[ct][chrom][m] = [0] * n_bins
+                signal[ct][m] = [0] * n_bins
+
+            for i, l in enumerate(in_f):
+                for m, v in izip(marks, map(int, l.strip().split())):
+                    # signal[ct][chrom][m][i] = v
+
+                    signal[ct][m][i] = float(v * (10 ** 9 / BIN_SIZE)) / total_reads_per_mark[ct][m]
+
+                    if LOG2RPKM:
+                        signal[ct][m][i] = math.log(signal[ct][m][i] + 1, 2)
+
+    return signal
+
+
+def compute_signal_diff(chrom_signal_A, chrom_signal_B, chunk_start=None, chunk_end=None, compute_per_state_scores=False):
+
+    start = 0
+    end = len(chrom_signal_A.values()[0].values()[0])
+    marks = sorted(chrom_signal_A.values()[0].keys())
+
+    if chunk_start is not None:
+        start = chunk_start
+        end = chunk_end
+
+    all_scores = dict((score_type, [0] * (end - start)) for score_type in [OVERALL_SCORE] + (marks if compute_per_state_scores else []))
+    # scores = [0] * (end - start)
+
+    for score_i, bin_i in enumerate(xrange(start, end)):
+        all_scores[OVERALL_SCORE][score_i] = eucld([mean([chrom_signal_A[ct][m][bin_i] for ct in chrom_signal_A]) for m in marks],
+                                                   [mean([chrom_signal_B[ct][m][bin_i] for ct in chrom_signal_B]) for m in marks])
+        if compute_per_state_scores:
+            for m in marks:
+                all_scores[m][score_i] = mean([chrom_signal_A[ct][m][bin_i] for ct in chrom_signal_A]) - mean([chrom_signal_B[ct][m][bin_i] for ct in chrom_signal_B])
+
+    return all_scores
+
+
 def process_shuffled_combo( combo_no,
                             shuffled_A_datasets,
                             shuffled_A_segmentations,
@@ -496,9 +670,12 @@ def process_shuffled_combo( combo_no,
                             shuffled_B_segmentations,
 
                             emissions,
+                            signal_dir,
+                            total_reads_per_mark,
 
                             random_chunks,
                             BIN_SIZE,
+                            LOG2RPKM,
                             states,
                             compute_per_state_scores,
                             max_min_window,
@@ -527,23 +704,31 @@ def process_shuffled_combo( combo_no,
 
     for chrom in sorted(random_chunks):
         # echo(combo_no, chrom)
-        chrom_segmentations_A = [chrom_segmentation_to_list(shuffled_A_segmentations[d][chrom], BIN_SIZE) for d in shuffled_A_datasets]
-        chrom_segmentations_B = [chrom_segmentation_to_list(shuffled_B_segmentations[d][chrom], BIN_SIZE) for d in shuffled_B_datasets]
+        if emissions:
+            chrom_segmentations_A = [chrom_segmentation_to_list(shuffled_A_segmentations[d][chrom], BIN_SIZE) for d in shuffled_A_datasets]
+            chrom_segmentations_B = [chrom_segmentation_to_list(shuffled_B_segmentations[d][chrom], BIN_SIZE) for d in shuffled_B_datasets]
+        elif signal_dir:
+            chrom_signal_A = read_ChromHMM_signal(chrom, signal_dir, shuffled_A_datasets, total_reads_per_mark, BIN_SIZE, LOG2RPKM)
+            chrom_signal_B = read_ChromHMM_signal(chrom, signal_dir, shuffled_B_datasets, total_reads_per_mark, BIN_SIZE, LOG2RPKM)
 
         for chunk_start, chunk_end in random_chunks[chrom]:
             # echo(combo_no, chunk_start, chunk_end)
-            chunk_segmentations_A = dict((d, seg[chunk_start:chunk_end]) for d, seg in izip(shuffled_A_datasets, chrom_segmentations_A))
-            chunk_segmentations_B = dict((d, seg[chunk_start:chunk_end]) for d, seg in izip(shuffled_B_datasets, chrom_segmentations_B))
+            chunk_scores = None
+            if emissions:
+                chunk_segmentations_A = dict((d, seg[chunk_start:chunk_end]) for d, seg in izip(shuffled_A_datasets, chrom_segmentations_A))
+                chunk_segmentations_B = dict((d, seg[chunk_start:chunk_end]) for d, seg in izip(shuffled_B_datasets, chrom_segmentations_B))
 
-            chunk_scores = get_overall_and_per_state_diff_score_emissions(chrom,
-                                                                chunk_segmentations_A,
-                                                                chunk_segmentations_B,
-                                                                emissions,
-                                                                BIN_SIZE,
-                                                                states,
-                                                                compute_per_state_scores,
-                                                                max_min_window,
-                                                                background_chunk=True)
+                chunk_scores = get_overall_and_per_state_diff_score_emissions(chrom,
+                                                                    chunk_segmentations_A,
+                                                                    chunk_segmentations_B,
+                                                                    emissions,
+                                                                    BIN_SIZE,
+                                                                    states,
+                                                                    compute_per_state_scores,
+                                                                    max_min_window,
+                                                                    background_chunk=True)
+            elif signal_dir:
+                chunk_scores = compute_signal_diff(chrom_signal_A, chrom_signal_B, chunk_start, chunk_end, compute_per_state_scores=compute_per_state_scores)
 
             if to_smooth:
                 chunk_scores = dict((score_type, smooth(chunk_scores[score_type])) for score_type in chunk_scores)
@@ -562,7 +747,13 @@ def compute_foreground_scores(group_A_segmentations,
                               group_B_segmentations,
                               random_chunks,
                               states,
+
                               emissions,
+                              signal_dir,
+                              total_reads_per_mark,
+                              BIN_SIZE=None,
+                              LOG2RPKM=None,
+
                               to_smooth=False,
                               max_min_window=0,
                               compute_per_state_scores=False):
@@ -573,23 +764,31 @@ def compute_foreground_scores(group_A_segmentations,
     datasets_B = sorted(group_B_segmentations)
 
     for chrom in random_chunks:
-
-        chrom_segmentations_A = [chrom_segmentation_to_list(group_A_segmentations[d][chrom], BIN_SIZE) for d in datasets_A]
-        chrom_segmentations_B = [chrom_segmentation_to_list(group_B_segmentations[d][chrom], BIN_SIZE) for d in datasets_B]
+        if emissions:
+            chrom_segmentations_A = [chrom_segmentation_to_list(group_A_segmentations[d][chrom], BIN_SIZE) for d in datasets_A]
+            chrom_segmentations_B = [chrom_segmentation_to_list(group_B_segmentations[d][chrom], BIN_SIZE) for d in datasets_B]
+        elif signal_dir:
+            chrom_signal_A = read_ChromHMM_signal(chrom, signal_dir, datasets_A, total_reads_per_mark, BIN_SIZE, LOG2RPKM)
+            chrom_signal_B = read_ChromHMM_signal(chrom, signal_dir, datasets_B, total_reads_per_mark, BIN_SIZE, LOG2RPKM)
 
         for chunk_start, chunk_end in random_chunks[chrom]:
-            chunk_segmentations_A = dict((d, seg[chunk_start:chunk_end]) for d, seg in izip(datasets_A, chrom_segmentations_A))
-            chunk_segmentations_B = dict((d, seg[chunk_start:chunk_end]) for d, seg in izip(datasets_B, chrom_segmentations_B))
 
-            chunk_scores = get_overall_and_per_state_diff_score_emissions(chrom,
-                                                                chunk_segmentations_A,
-                                                                chunk_segmentations_B,
-                                                                emissions,
-                                                                BIN_SIZE,
-                                                                states,
-                                                                compute_per_state_scores,
-                                                                max_min_window,
-                                                                background_chunk=True)
+            if emissions:
+                chunk_segmentations_A = dict((d, seg[chunk_start:chunk_end]) for d, seg in izip(datasets_A, chrom_segmentations_A))
+                chunk_segmentations_B = dict((d, seg[chunk_start:chunk_end]) for d, seg in izip(datasets_B, chrom_segmentations_B))
+
+                chunk_scores = get_overall_and_per_state_diff_score_emissions(chrom,
+                                                                    chunk_segmentations_A,
+                                                                    chunk_segmentations_B,
+                                                                    emissions,
+                                                                    BIN_SIZE,
+                                                                    states,
+                                                                    compute_per_state_scores,
+                                                                    max_min_window,
+                                                                    background_chunk=True)
+
+            elif signal_dir:
+                chunk_scores = compute_signal_diff(chrom_signal_A, chrom_signal_B, chunk_start, chunk_end, compute_per_state_scores=compute_per_state_scores)
 
             if to_smooth:
                 chunk_scores = dict((score_type, smooth(chunk_scores[score_type])) for score_type in chunk_scores)
@@ -618,10 +817,13 @@ def compute_background_model(args,
                              group_A_segmentations,
                              group_B_segmentations,
                              states,
-                             emissions):
+                             emissions,
+                             signal_dir,
+                             total_reads_per_mark,
+                             BIN_SIZE,
+                             LOG2RPKM):
 
     # pick the random chunks
-    BIN_SIZE = args.bin_size
 
     RANDOM_CHUNK_LENGTH = 1000000 / BIN_SIZE
     N_RANDOM_CHUNKS = 100
@@ -661,40 +863,62 @@ def compute_background_model(args,
 
     if args.chrom_hmm_binarized:
         from permute_marks_in_binarized_ChromHMM_baseline import compute_background_scores_by_shuffling_marks
-        background_scores = compute_background_scores_by_shuffling_marks(args.chrom_hmm_binarized,
+        if emissions:
+            background_scores = compute_background_scores_by_shuffling_marks(args.chrom_hmm_binarized,
                                                                          group_A_segmentations.keys() + group_B_segmentations.keys(),
                                                                          args.chrom_hmm_model_path,
                                                                          random_chunks,
                                                                          n_group_A=len(group_A_segmentations),
                                                                          BIN_SIZE=BIN_SIZE,
+                                                                         LOG2RPKM=LOG2RPKM,
                                                                          states=states,
                                                                          n_perms=MAX_N_SHUFFLED_SAMPLES,
                                                                          compute_per_state_scores=args.per_state_scores,
                                                                          emissions=emissions,
                                                                          max_min_window=args.max_min_window,
-                                                                         to_smooth=args.smooth)
-
-    else:
+                                                                         to_smooth=args.smooth
+                                                                         )
+    elif emissions:
         echo('Learning significance threshold for at p-value:', fdr_threshold)
         background_scores = compute_background_scores_by_shuffling_segmentations(group_A_segmentations,
                                                                                  group_B_segmentations,
                                                                                  random_chunks,
                                                                                  states,
                                                                                  emissions=emissions,
+                                                                                 signal_dir=signal_dir,
+                                                                                 total_reads_per_mark=total_reads_per_mark,
                                                                                  n_perm=MAX_N_SHUFFLED_SAMPLES,
                                                                                  compute_per_state_scores=args.per_state_scores,
                                                                                  to_smooth=args.smooth,
                                                                                  max_min_window=args.max_min_window,
-                                                                                 n_threads=args.n_threads)
+                                                                                 n_threads=args.n_threads,
+                                                                                 BIN_SIZE=BIN_SIZE,
+                                                                                 LOG2RPKM=LOG2RPKM)
+    elif signal_dir:
+        from permute_marks_in_binarized_ChromHMM_baseline import compute_background_scores_by_shuffling_marks_signal
+        background_scores = compute_background_scores_by_shuffling_marks_signal(group_A_segmentations.keys() + group_B_segmentations.keys(),
+                                                                                 random_chunks,
+                                                                                 n_group_A=len(group_A_segmentations),
+                                                                                 n_perms=MAX_N_SHUFFLED_SAMPLES,
+                                                                                 BIN_SIZE=BIN_SIZE,
+                                                                                 LOG2RPKM=LOG2RPKM,
+                                                                                 max_min_window=args.max_min_window,
+                                                                                 signal_dir=signal_dir,
+                                                                                 total_reads_per_mark=total_reads_per_mark,
+                                                                                 to_smooth=args.smooth)
 
     foreground_scores = compute_foreground_scores(group_A_segmentations,
                                                   group_B_segmentations,
                                                   random_chunks,
                                                   states,
                                                   emissions=emissions,
+                                                  signal_dir=signal_dir,
+                                                  total_reads_per_mark=total_reads_per_mark,
                                                   to_smooth=args.smooth,
                                                   max_min_window=args.max_min_window,
-                                                  compute_per_state_scores=args.per_state_scores)
+                                                  compute_per_state_scores=args.per_state_scores,
+                                                  BIN_SIZE=BIN_SIZE,
+                                                  LOG2RPKM=LOG2RPKM)
 
     background_model = dict((k, {0.0: 1}) for k in [OVERALL_SCORE] + (states if compute_per_state_scores else []))
     background_threshold = dict((k, None) for k in [OVERALL_SCORE] + (states if compute_per_state_scores else []))
@@ -757,6 +981,39 @@ def read_emissions(emissions_fname):
             metric['E' + buf[0]] = dict((m, float(v)) for m, v in zip(header[1:], buf[1:]))
     return metric
 
+
+def calculate_total_reads(celltypes, signal_dir):
+    echo('Counting the reads')
+    total_reads_per_mark = {}
+    for fname in os.listdir(signal_dir):
+        if not fname.endswith('txt.gz'):
+            continue
+
+        with open_file(os.path.join(signal_dir, fname)) as in_f:
+            ct, chrom = in_f.readline().strip().split()
+            if ct not in celltypes:# or chrom not in chromosomes:
+                continue
+
+            echo(fname)
+            marks = in_f.readline().strip().split()
+
+            if ct not in total_reads_per_mark:
+                total_reads_per_mark[ct] = dict((m, 0) for m in marks)
+
+            for i, l in enumerate(in_f):
+                for m, v in izip(marks, map(int, l.strip().split())):
+                    total_reads_per_mark[ct][m] += v
+    print pprint.pformat(total_reads_per_mark)
+    return total_reads_per_mark
+
+
+
+
+
+EMISSION_SCORES = 'emissions'
+MARK_SCORES = 'marks'
+POSTERIOR_SCORES = 'posteriors'
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
 
@@ -781,6 +1038,12 @@ if __name__ == '__main__':
 
     parser.add_argument('--emissions', help='emission probabilities to compute score based on euclidean distance of emissions')
 
+    parser.add_argument('--signal-dir', help='ChromHMM signal directory for euclidean distance of the signal')
+    parser.add_argument('--log2rpkm', action='store_true', help='take log2 rpkm for signal delta', default=False)
+
+    parser.add_argument('--posteriors-dir', help='ChromHMM posteriors directory for computing the difference based on posteriors only')
+    parser.add_argument('--baseline', choices=[EMISSION_SCORES, MARK_SCORES, POSTERIOR_SCORES], help='baseline type')
+
     args = parser.parse_args()
 
     if len(sys.argv) == 1:
@@ -791,9 +1054,10 @@ if __name__ == '__main__':
     BIN_SIZE = args.bin_size
     echo('cmd:', ' '.join(sys.argv))
     for arg in sorted(vars(args)):
-        echo(arg , '=', getattr(args, arg))
+        echo(arg, '=', getattr(args, arg))
 
     random.seed(36830804669286)
+    LOG2RPKM = args.log2rpkm
 
     max_min_window = args.max_min_window
 
@@ -806,6 +1070,7 @@ if __name__ == '__main__':
                                              for segs in [group_A_segmentations, group_B_segmentations]
                                              for s in segs.values()]),
                          key=lambda c: int(c.replace('chr','')) if re.search(r'^chr(\d+)$', c) else 100)
+
     # print chromosomes
     group_A_segmentations = filter_chroms(group_A_segmentations, chromosomes)
     group_B_segmentations = filter_chroms(group_B_segmentations, chromosomes)
@@ -814,17 +1079,32 @@ if __name__ == '__main__':
     if args.emissions:
         emissions = read_emissions(args.emissions)
 
+    posteriors_dir = None
+    if args.posteriors_dir:
+        posteriors_dir = args.posteriors_dir
+
+    signal_dir = None
+    total_reads_per_mark = None
+    if args.signal_dir:
+        signal_dir = args.signal_dir
+        celltypes = sorted([re.sub(r'_(\d+)$', '', os.path.split(d)[1].split('_segments')[0]) for d in list(args.a) + list(args.b)])
+        total_reads_per_mark = calculate_total_reads(celltypes, args.signal_dir)
+
     fdr_threshold = args.fdr_threshold
 
     out_fname = args.output
 
-    background_model, background_threshold = compute_background_model(args,
-                                                                      fdr_threshold,
-                                                                      chromosomes,
-                                                                      group_A_segmentations,
-                                                                      group_B_segmentations,
-                                                                      states,
-                                                                      emissions=emissions)
+    # background_model, background_threshold = compute_background_model(args,
+    #                                                                   fdr_threshold,
+    #                                                                   chromosomes,
+    #                                                                   group_A_segmentations,
+    #                                                                   group_B_segmentations,
+    #                                                                   states,
+    #                                                                   emissions=emissions,
+    #                                                                   signal_dir=signal_dir,
+    #                                                                   total_reads_per_mark=total_reads_per_mark,
+    #                                                                   BIN_SIZE=BIN_SIZE,
+    #                                                                   LOG2RPKM=LOG2RPKM)
 
     real_scores = {}
     real_state_transitions = {}
@@ -838,27 +1118,51 @@ if __name__ == '__main__':
 
     all_signal = {}
     all_transitions = {}
+    score_types = None
     for chrom, signal, state_transitions in _map(worker,
-                                                 [(get_overall_and_per_state_diff_score_emissions,
-                                                   _chrom,
-                                                   dict((d, {_chrom: group_A_segmentations[d][_chrom]}) for d in group_A_segmentations),
-                                                   dict((d, {_chrom: group_B_segmentations[d][_chrom]}) for d in group_B_segmentations),
-                                                   emissions,
-                                                   BIN_SIZE,
-                                                   states,
-                                                   compute_per_state_scores,
-                                                   max_min_window) for _chrom in chromosomes]):
+                                                 [{EMISSION_SCORES:
+                                                       (get_overall_and_per_state_diff_score_emissions,
+                                                       _chrom,
+                                                       dict((d, {_chrom: group_A_segmentations[d][_chrom]}) for d in group_A_segmentations),
+                                                       dict((d, {_chrom: group_B_segmentations[d][_chrom]}) for d in group_B_segmentations),
+                                                       emissions if emissions else signal_dir,
+                                                       BIN_SIZE,
+                                                       total_reads_per_mark,
+                                                       compute_per_state_scores,
+                                                       max_min_window),
+                                                   MARK_SCORES:(get_overall_and_per_state_diff_score_signal,
+                                                                _chrom,
+                                                                dict((d, {_chrom: group_A_segmentations[d][_chrom]}) for d in group_A_segmentations),
+                                                                dict((d, {_chrom: group_B_segmentations[d][_chrom]}) for d in group_B_segmentations),
+                                                                signal_dir,
+                                                                BIN_SIZE,
+                                                                LOG2RPKM,
+                                                                total_reads_per_mark,
+                                                                compute_per_state_scores,
+                                                                max_min_window),
+                                                   POSTERIOR_SCORES:(
+                                                        get_overall_and_per_state_diff_score_posteriors,
+                                                        _chrom,
+                                                        dict((d, {_chrom: group_A_segmentations[d][_chrom]}) for d in group_A_segmentations),
+                                                        dict((d, {_chrom: group_B_segmentations[d][_chrom]}) for d in group_B_segmentations),
+                                                        posteriors_dir,
+                                                        BIN_SIZE,
+                                                        compute_per_state_scores,
+                                                        max_min_window
+                                                   )}[args.baseline] for _chrom in chromosomes]):
 
         if args.smooth:
             smooth_dict(signal)
 
+        score_types = sorted(signal)
+        print score_types
         all_signal[chrom] = signal
         all_transitions[chrom] = state_transitions
 
     if args.n_threads > 1:
         pool.close()
 
-    for score_type in [OVERALL_SCORE] + (states if compute_per_state_scores else []):
+    for score_type in score_types:
         gc.collect()
         echo('Writing wiggle file for', score_type)
         with open_file(out_fname + '.' + re.sub(r'\W+', '_', score_type) + '.wig.gz', 'w') as out_signal_file:
@@ -881,7 +1185,7 @@ if __name__ == '__main__':
                                         '.',
                                         closest_state_A + '-' + closest_state_B,
                                         ','.join(a_states) + '/' + ','.join(b_states),
-                                        get_FDR(abs(score), background_model, score_type),
+                                        'NA', #get_FDR(abs(score), background_model, score_type),
                                         '1' if score >= threshold else '0'])) + '\n')
 
         if score_type is OVERALL_SCORE:
@@ -893,21 +1197,31 @@ if __name__ == '__main__':
                 for score, chrom, bin_no, (closest_state_A, closest_state_B, a_states, b_states) \
                         in sorted(group_scores,
                                   key=lambda (score, chrom, bin_no, state_transition): (-score, chrom, bin_no)):
-                    write_line(out_f, chrom, bin_no, score, closest_state_A, closest_state_B, a_states, b_states, score_type, background_threshold[score_type])
+                    write_line(out_f, chrom, bin_no, score, closest_state_A, closest_state_B, a_states, b_states, score_type, 0) #background_threshold[score_type])
 
         else:
-            for group in [GROUP_A, GROUP_B]:
-                group_scores = [(score, chrom, bin_no, state_transition)
-                                for chrom in chromosomes
-                                    for bin_no, (score, state_transition) in enumerate(izip(all_signal[chrom][score_type], all_transitions[chrom]))
-                                        if ((group == GROUP_A and score >= 0) or (group == GROUP_B and score < 0))]
+            group_scores = [(score, chrom, bin_no, state_transition)
+                            for chrom in chromosomes
+                                for bin_no, (score, state_transition) in enumerate(izip(all_signal[chrom][score_type], all_transitions[chrom]))]
 
-                with open_file(out_fname + '.' + re.sub(r'\W+', '_', score_type) + '.group_' + group + '.summary.bed.gz', 'w') as out_f:
-                    for score, chrom, bin_no, (closest_state_A, closest_state_B, a_states, b_states) \
-                            in sorted(group_scores,
-                                      key=lambda (score, chrom, bin_no, state_transition): (-abs(score), chrom, bin_no)):
-                        write_line(out_f, chrom, bin_no, score, closest_state_A, closest_state_B, a_states, b_states, score_type, background_threshold[score_type])
+            with open_file(out_fname + '.' + re.sub(r'\W+', '_', score_type) + '.both_groups.summary.bed.gz', 'w') as out_f:
+                for score, chrom, bin_no, (closest_state_A, closest_state_B, a_states, b_states) \
+                        in sorted(group_scores,
+                                  key=lambda (score, chrom, bin_no, state_transition): (score, chrom, bin_no)):
+                    write_line(out_f, chrom, bin_no, score, closest_state_A, closest_state_B, a_states, b_states, score_type, 0) #background_threshold[score_type])
 
+            # for group in [GROUP_A, GROUP_B]:
+            #     group_scores = [(score, chrom, bin_no, state_transition)
+            #                     for chrom in chromosomes
+            #                         for bin_no, (score, state_transition) in enumerate(izip(all_signal[chrom][score_type], all_transitions[chrom]))
+            #                             if ((group == GROUP_A and score >= 0) or (group == GROUP_B and score < 0))]
+            #
+            #     with open_file(out_fname + '.' + re.sub(r'\W+', '_', score_type) + '.group_' + group + '.summary.bed.gz', 'w') as out_f:
+            #         for score, chrom, bin_no, (closest_state_A, closest_state_B, a_states, b_states) \
+            #                 in sorted(group_scores,
+            #                           key=lambda (score, chrom, bin_no, state_transition): (-abs(score), chrom, bin_no)):
+            #             write_line(out_f, chrom, bin_no, score, closest_state_A, closest_state_B, a_states, b_states, score_type, 0) #background_threshold[score_type])
+            #
         for chrom in all_signal:
             del all_signal[chrom][score_type]
 

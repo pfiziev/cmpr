@@ -7,7 +7,8 @@ import sys, random
 import tempfile
 import operator
 import re
-from chrom_compare_baseline import get_overall_and_per_state_diff_score_emissions
+from chrom_compare_baseline import get_overall_and_per_state_diff_score_emissions, read_ChromHMM_signal, \
+    compute_signal_diff
 from metric import *
 from utils import echo, read_segmentations, filter_chroms, smooth
 from subprocess import call
@@ -56,13 +57,100 @@ def clean_up_directory(dirname):
     for f in os.listdir(dirname):
         os.remove(os.path.join(dirname, f))
 
+
+def compute_background_scores_by_shuffling_marks_signal( seg_fnames=None,
+                                                         random_chunks=None,
+                                                         n_group_A=None,
+                                                         n_perms=100,
+                                                         max_min_window=0,
+                                                         signal_dir=None,
+                                                         BIN_SIZE=None,
+                                                         LOG2RPKM=None,
+                                                         total_reads_per_mark=None,
+                                                         to_smooth=False):
+
+    celltypes = sorted([re.sub(r'_(\d+)$', '', os.path.split(d)[1].split('_segments')[0]) for d in seg_fnames])
+
+    # get the mark names
+    marks = None
+    print signal_dir
+    fname = os.path.join(signal_dir, celltypes[0] + '_' + random_chunks.keys()[0] + '_signal.txt.gz')
+    with open_file(fname) as in_f:
+        _, _ = in_f.readline().strip().split()
+        marks = in_f.readline().strip().split()
+
+    print marks
+    background_model = {}
+
+    mark_celltype_order = dict((m, list(celltypes)) for m in marks)
+
+    seen = set()
+    # seen.add(tuple([d for m in mark_celltype_order for d in mark_celltype_order[m]]))
+    for perm_idx in xrange(n_perms):
+        if perm_idx >= 0:
+            key = None
+            while key is None or key in seen:
+                for m in mark_celltype_order:
+                    random.shuffle(mark_celltype_order[m])
+                key = tuple([tuple(d for d in mark_celltype_order[m]) for m in sorted(mark_celltype_order)])
+            seen.add(key)
+
+    for chrom in random_chunks:
+
+        chrom_signal = read_ChromHMM_signal(chrom, signal_dir, seg_fnames, total_reads_per_mark, BIN_SIZE, LOG2RPKM=LOG2RPKM)
+        for perm_idx, permutation in enumerate(sorted(seen)):
+            # print permutation
+            # echo('combo:', perm_idx)
+
+            chrom_signal_A = dict((ct, dict((m, chrom_signal[permutation[m_i][ct]][m])
+                                            for m_i, m in enumerate(marks)))
+                                  for ct in xrange(n_group_A))
+
+            chrom_signal_B = dict((ct, dict((m, chrom_signal[permutation[m_i][ct]][m])
+                                            for m_i, m in enumerate(marks)))
+                                  for ct in xrange(n_group_A, len(celltypes)))
+
+            for chunk_start, chunk_end in random_chunks[chrom]:
+                # print chrom, chunk_start, chunk_end
+
+                # for ct in xrange(len(celltypes)):
+                #     print ct, chunk_start * BIN_SIZE,
+                #     for m in marks:
+                #         print (chrom_signal_A if ct < n_group_A else chrom_signal_B)[ct][m][chunk_start], ' ',
+                #     print
+
+                chunk_scores = compute_signal_diff(chrom_signal_A, chrom_signal_B, chunk_start=chunk_start, chunk_end=chunk_end)
+
+                if to_smooth:
+                    chunk_scores = dict((score_type, smooth(chunk_scores[score_type])) for score_type in chunk_scores)
+
+                for s in chunk_scores:
+
+                   if s not in background_model:
+                       background_model[s] = 0
+                   background_model[s] += 1
+
+    # convert the score counts to a CDF
+    total_regions = sum(background_model.itervalues())
+    total_so_far = 0
+
+    for s in sorted(background_model, reverse=True):
+        total_so_far += background_model[s]
+        background_model[s] = total_so_far / float(total_regions)
+
+    # return dict((score_type, sorted(background_model[score_type].items())) for score_type in background_model)
+    print 'DONE'
+    return {OVERALL_SCORE: sorted(background_model.items())}
+
+
 def compute_background_scores_by_shuffling_marks(bin_directory,
                                                  seg_fnames,
                                                  ChromHMM_model_path,
                                                  random_chunks,
                                                  n_group_A,
-                                                 BIN_SIZE,
-                                                 states,
+                                                 BIN_SIZE=None,
+                                                 LOG2RPKM=None,
+                                                 states=None,
                                                  n_perms=100,
                                                  compute_per_state_scores=False,
                                                  max_min_window=0,
@@ -184,10 +272,10 @@ def process_shuffled_segmentations(n_group_A,
     group_A_segmentations = filter_chroms(group_A_segmentations, chromosomes)
     group_B_segmentations = filter_chroms(group_B_segmentations, chromosomes)
 
-    metric_A = learn_metric_from_all_replicates(group_A_segmentations, states, BIN_SIZE)
+    # metric_A = learn_metric_from_all_replicates(group_A_segmentations, states, BIN_SIZE)
     # print_metric(metric_A)
 
-    metric_B = learn_metric_from_all_replicates(group_B_segmentations, states, BIN_SIZE)
+    # metric_B = learn_metric_from_all_replicates(group_B_segmentations, states, BIN_SIZE)
     # print_metric(metric_B)
     # print_average_metric(states, metric_A, metric_B)
 

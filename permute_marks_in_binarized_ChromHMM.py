@@ -99,7 +99,7 @@ def compute_background_scores_by_shuffling_marks(bin_directory,
                 ct_chrom_fnames[ct][chrom] = fname.replace('_' + original_chrom + '_', '_' + chrom + '_')
                 chrom_lengths[chrom] = len(c_data[chrom][marks[0]])
 
-    mark_celltype_order = dict((m, list(data.keys())) for m in marks)
+    mark_celltype_order = dict((m, list(sorted(data.keys()))) for m in marks)
 
     seen = set()
     # seen.add(tuple([d for m in mark_celltype_order for d in mark_celltype_order[m]]))
@@ -109,7 +109,7 @@ def compute_background_scores_by_shuffling_marks(bin_directory,
             while key is None or key in seen:
                 for m in mark_celltype_order:
                     random.shuffle(mark_celltype_order[m])
-                key = tuple([d for m in mark_celltype_order for d in mark_celltype_order[m]])
+                key = tuple([d for m in sorted(mark_celltype_order) for d in mark_celltype_order[m]])
             seen.add(key)
         echo('combo:', perm_idx)
         for chrom in chrom_lengths:
