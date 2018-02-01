@@ -302,7 +302,7 @@ print_metric(metric_A)
 
 metric_B = learn_metric(group_B_segmentations, states, BIN_SIZE)
 print_metric(metric_B)
-print_average_metric(states, metric_A, metric_B)
+print_consistent_state_transition_scores(states, metric_A, metric_B)
 
 fdr_threshold = args.fdr_threshold
 pure_state_transitions = generate_pure_state_transitions(states, metric_A, metric_B)

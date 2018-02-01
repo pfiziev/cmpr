@@ -69,7 +69,8 @@ def compute_background_scores_by_shuffling_marks_signal( seg_fnames=None,
                                                          total_reads_per_mark=None,
                                                          to_smooth=False):
 
-    celltypes = sorted([re.sub(r'_(\d+)$', '', os.path.split(d)[1].split('_segments')[0]) for d in seg_fnames])
+    from chrom_compare_baseline import get_celltype
+    celltypes = sorted([get_celltype(d) for d in seg_fnames])
 
     # get the mark names
     marks = None
@@ -159,7 +160,8 @@ def compute_background_scores_by_shuffling_marks(bin_directory,
 
     chrom_lengths = {}
     ct_chrom_fnames = {}
-    celltypes = set(re.sub(r'_(\d+)$', '', os.path.split(sf)[1].split('_segments')[0]) for sf in seg_fnames)
+    from chrom_compare_baseline import get_celltype
+    celltypes = set(get_celltype(sf) for sf in seg_fnames)
 
     out_dir = tempfile.mkdtemp()
     echo('temp dir:', out_dir)

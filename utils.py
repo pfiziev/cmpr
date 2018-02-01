@@ -12,6 +12,10 @@ import string
 import datetime
 import math
 import ctypes
+import random
+import gc
+
+random.seed(42)
 
 ROOT_DIR = os.path.split(__file__)[0]
 
@@ -38,17 +42,19 @@ def open_log(fname):
     """ Opens a log file
     """
     open_log.logfile = open(fname, 'w', 1)
+    open_log.start_time = datetime.datetime.now()
 
-
-def logm(message):
-    """ Logs a message with a time stamp to the log file opened by open_log
-    """
-    print "[%s] %s" % (datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'), message)
-    open_log.logfile.write("[ %s ] %s\n" % (datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'), message))
+# def logm(message):
+#     """ Logs a message with a time stamp to the log file opened by open_log
+#     """
+#     print "[%s] %s" % (datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'), message)
+#     open_log.logfile.write("[ %s ] %s\n" % (datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'), message))
 
 
 def echo(*message):
-    to_print = "[%s] %s" % (datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'), ' '.join(map(str, message)))
+    to_print = "[pid:%d %s] %s" % (os.getpid(),
+                                 datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                                 ' '.join(map(str, message)))
     print to_print
     if hasattr(open_log, 'logfile'):
         open_log.logfile.write(to_print + '\n')
@@ -63,6 +69,7 @@ def echo_to_stdder(*message):
 def close_log():
     """ Closes the log file opened by open_log
     """
+    echo('Elapsed time:', datetime.datetime.now() - open_log.start_time)
     open_log.logfile.close()
 
 def mean(array):
@@ -121,17 +128,79 @@ def pearsonr(responses, predictions):
                    for r, p in izip(responses, predictions)) / math.sqrt(var_response * var_prediction)
 
 
-def open_file(fname, mode='r'):
+def open_file1(fname, mode='r'):
     return gzip.open(fname, mode) if fname.endswith('.gz') else open(fname, mode)
+
+
+import subprocess, io
+
+
+class _GZipFileWriter:
+    def __init__(self, fileName):
+        # echo('Constructing _GZipFileWriter:', fileName)
+
+        self.f = open(fileName, 'w')
+        self.p = subprocess.Popen(['gzip'], stdin=subprocess.PIPE, stdout=self.f)
+        # echo('Starting gzip child process:', self.p.pid)
+
+    def __enter__(self):
+        return self.p.stdin
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        self.p.stdin.close()
+        # echo('Waiting on', self.p.pid)
+        self.p.wait()
+        self.f.close()
+
+
+def open_file(fname, mode='r'):
+    if fname.endswith('.gz'):
+
+        if mode == 'w':
+            return _GZipFileWriter(fname)
+        elif mode == 'r':
+            return io.BufferedReader(gzip.open(fname, 'r'))
+            # in_f = open(fname, 'rb')
+            # p = subprocess.Popen(['gunzip'], stdout=subprocess.PIPE, stdin=in_f)
+            # return p.stdout
+        else:
+            error('Only w and r are supported modes for gzipped files. fname=' + fname + ', mode=' + mode)
+
+    else:
+        return open(fname, mode)
+
+#
+# def reap_gzip_zombies():
+#     to_remove = []
+#     for i in xrange(len(reap_gzip_zombies.procs)):
+#         p = reap_gzip_zombies.procs[i]
+#         return_code = p.poll()
+#
+#         if return_code is not None:
+#             echo('Reaping:', p, p.pid, return_code)
+#             p.wait()
+#             to_remove.append(i)
+#
+#     for i in to_remove:
+#         reap_gzip_zombies.procs.pop(i)
+#
+# reap_gzip_zombies.procs = []
 
 def append_and_unlink(from_fname, to_fname):
     # append the file content of from_file to to_file and delete from_file
+    if type(to_fname) is str:
+        to_f = open_file(to_fname, 'a')
+    else:
+        to_f = to_fname
 
-    with open_file(from_fname) as from_f, \
-         open_file(to_fname, 'a') as to_f:
+    with open_file(from_fname) as from_f:
         to_f.write(from_f.read())
 
     os.unlink(from_fname)
+
+    if type(to_fname) is str:
+        to_f.close()
+
 
 def not_None(thing):
     return thing is not None
@@ -179,12 +248,24 @@ def gaussian(data):
         gaussian.n = sum(math.exp(-((i - mean)**2) / (2 * std ** 2)) for i, v in enumerate(data))
     return sum(math.exp(-((i - mean)**2) / (2 * std ** 2)) * v for i, v in enumerate(data)) / gaussian.n
 
+PRECISION = 5
 
 def smooth(wig_data, filter='gaussian', bandwidth=10):
     result = [0] * len(wig_data)
+    window = [0] * (2 * bandwidth + 1)
+
+    def copy_window(window, wig_data, bin_idx, bandwidth):
+        for w_idx, score_idx in enumerate(xrange(bin_idx - bandwidth, bin_idx + bandwidth + 1)):
+            if score_idx < 0 or score_idx >= len(wig_data):
+                value = 0
+            else:
+                value = wig_data[score_idx]
+            window[w_idx] = value
+
     for bin_idx in xrange(len(wig_data)):
-        window = wig_data[max(bin_idx - bandwidth, 0):
-                          min(bin_idx + bandwidth + 1, len(wig_data))]
+        copy_window(window, wig_data, bin_idx, bandwidth)
+        # window = wig_data[max(bin_idx - bandwidth, 0):
+        #                   min(bin_idx + bandwidth + 2, len(wig_data))]
         if filter == 'box':
             result[bin_idx] = box(window)
         elif filter == 'gaussian':
@@ -193,16 +274,48 @@ def smooth(wig_data, filter='gaussian', bandwidth=10):
             print >>sys.stderr, 'ERROR: unsupported filter:', filter
             exit(1)
 
+        result[bin_idx] = round(result[bin_idx], PRECISION)
+
     return result
 
 
+def smooth_in_place(wig_data, filter='gaussian', bandwidth=10):
+
+    window = [0] * bandwidth + wig_data[:bandwidth + 1]
+
+    def copy_window(window, wig_data, bin_idx, bandwidth):
+        for i in xrange(len(window) - 1):
+            window[i] = window[i + 1]
+        window[-1] = wig_data[bin_idx + bandwidth] if bin_idx + bandwidth < len(wig_data) else 0
+
+    for bin_idx in xrange(len(wig_data)):
+        copy_window(window, wig_data, bin_idx, bandwidth)
+        # window = wig_data[max(bin_idx - bandwidth, 0):
+        #                   min(bin_idx + bandwidth + 2, len(wig_data))]
+        if filter == 'box':
+            wig_data[bin_idx] = box(window)
+        elif filter == 'gaussian':
+            wig_data[bin_idx] = gaussian(window)
+        else:
+            print >>sys.stderr, 'ERROR: unsupported filter:', filter
+            exit(1)
+
+        wig_data[bin_idx] = round(wig_data[bin_idx], PRECISION)
+
+
 def smooth_dict(d, filter='gaussian', bandwidth=10):
-    for key in d:
-        d[key] = smooth(d[key], filter, bandwidth)
+    for key_idx, key in enumerate(d):
+        # echo('Smoothing', key)
+        smooth_in_place(d[key], filter, bandwidth)
+
+        if key_idx % 10 == 0:
+            gc.collect()
+        # d[key] = smooth(d[key], filter, bandwidth)
 
 
 def state_key(s):
     return int(s[1:]) if s[0] == 'E' else s
+
 
 def read_segmentations(filenames):
     data = {}
@@ -251,7 +364,6 @@ def log_poisson_pmf(k, Lambda):
     return (k * math.log(Lambda) - math.lgamma(k + 1.0) - Lambda) / math.log(2)
 
 
-
 def binom_test(observed, n, expected_freq=None, expected=None):
 
     if expected_freq is None:
@@ -272,3 +384,88 @@ def binom_test(observed, n, expected_freq=None, expected=None):
 def overlap(s1, e1, s2, e2):
     return min(e1, e2) - max(s1, s2)
 
+
+def generate_random_chunks(group_A_segmentations, chromosomes, BIN_SIZE, N_RANDOM_CHUNKS=10, _chrom_lengths=None):
+
+
+    if _chrom_lengths is not None:
+        chromosomes = sorted(_chrom_lengths)
+        chrom_lengths = [_chrom_lengths[c] for c in chromosomes]
+
+    else:
+        chrom_lengths = [group_A_segmentations.values()[0][chrom][-1][1] / BIN_SIZE for chrom in chromosomes]
+
+    total_genome_length = sum(chrom_lengths)
+
+    # echo('Total genome length:', total_genome_length)
+    # print chrom_lengths
+
+    RANDOM_CHUNK_LENGTH = 5000000 / BIN_SIZE
+
+    if (N_RANDOM_CHUNKS * RANDOM_CHUNK_LENGTH > total_genome_length / 5 or
+        N_RANDOM_CHUNKS * RANDOM_CHUNK_LENGTH > sum(l for l in chrom_lengths if l > RANDOM_CHUNK_LENGTH) / 5):
+
+        return dict((chromosomes[chrom_idx],
+                     [(0, chrom_length)]) for chrom_idx, chrom_length in enumerate(chrom_lengths))
+
+    MAX_TRIES = 10000
+
+    restart = True
+    random_chunks = None
+
+    while restart:
+
+        restart = False
+        random_chunks = {}
+
+        for _ in xrange(N_RANDOM_CHUNKS):
+            chunk_start = None
+            chrom = None
+            tries = 0
+
+            while chunk_start is None:
+                chunk_start = random.randint(0, total_genome_length - RANDOM_CHUNK_LENGTH - 1)
+
+                offset = 0
+                chrom_idx = 0
+                while offset + chrom_lengths[chrom_idx] <= chunk_start:
+                    offset += chrom_lengths[chrom_idx]
+                    chrom_idx += 1
+
+                chunk_start = chunk_start - offset
+                chrom = chromosomes[chrom_idx]
+
+                if chunk_start + RANDOM_CHUNK_LENGTH >= chrom_lengths[chrom_idx] or \
+                        any(overlap(chunk_start, chunk_start + RANDOM_CHUNK_LENGTH, cs, ce) > 0
+                            for cs, ce in random_chunks.get(chrom, [])):
+                    chunk_start = None
+
+                    tries += 1
+                    if tries > MAX_TRIES:
+                        restart = True
+                        break
+
+            if restart:
+                break
+
+            if chrom not in random_chunks:
+                random_chunks[chrom] = []
+
+            random_chunks[chrom].append((chunk_start, chunk_start + RANDOM_CHUNK_LENGTH))
+    # print dict((chrom, sorted(random_chunks[chrom])) for chrom in random_chunks)
+    return dict((chrom, sorted(random_chunks[chrom])) for chrom in random_chunks)
+
+
+def slice_segmentations(segmentations_dict, chunk_start, chunk_end):
+    return dict((d, segmentations_dict[d][chunk_start:chunk_end]) for d in segmentations_dict)
+
+
+def chunks(array, chunk_size):
+    chunk = []
+    for i, el in enumerate(array):
+        if i > 0 and i % chunk_size == 0:
+            yield chunk
+            chunk = []
+        chunk.append(el)
+    if len(chunk) > 0:
+        yield chunk

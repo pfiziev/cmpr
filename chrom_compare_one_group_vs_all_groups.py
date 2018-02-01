@@ -101,57 +101,42 @@ def expand_non_overlapping_windows(chrom, scores, state_transitions, chrom_segme
 
 
 def get_overall_and_per_state_diff_score(chrom,
-                                         group_A_segmentations,
-                                         metric_A,
-                                         group_B_segmentations,
-                                         metric_B,
+                                         group_segmentations,
+                                         metric,
                                          states,
                                          consistent_state_probs,
                                          compute_per_state_scores,
                                          max_min_window,
                                          background_chunk=False,
                                          use_posteriors=False,
-                                         report_per_group_state_probabilities=False):
-    verbose = not background_chunk
-    # verbose = True
+                                         report_per_group_state_probabilities=False,
+                                         constitutive_only=False):
 
-    if verbose:
-        echo('Chromosome:', chrom)
+    echo('Chromosome:', chrom)
 
-    cache_miss = 0
+    groups = sorted(group_segmentations)
 
-    datasets_A = sorted(group_A_segmentations)
-    datasets_B = sorted(group_B_segmentations)
+    datasets = dict((g, sorted(group_segmentations[g])) for g in groups)
 
-    chrom_segmentations_A = [group_A_segmentations[d] for d in datasets_A]
-    chrom_segmentations_B = [group_B_segmentations[d] for d in datasets_B]
+    chrom_segmentations = dict((g, [group_segmentations[g][d] for d in datasets[g]]) for g in groups)
 
-    if verbose:
-        echo('Chrom length:', len(chrom_segmentations_A[0]))
+    chrom_length = len(chrom_segmentations.values()[0][0])
+    echo('Chrom length:', chrom_length)
 
-    chrom_segmentations_windows, unique_windows = compress_segmentations_into_non_repeating_windows(
-                                                                                    chrom_segmentations_A,
-                                                                                    chrom_segmentations_B,
-                                                                                    max_min_window)
+    score_types = [OVERALL_SCORE] + (states if compute_per_state_scores else [])
+    if constitutive_only:
+        scores = {}
+    else:
+        scores = dict((g, dict((k, [0.0] * chrom_length) for k in score_types)) for g in groups)
 
-    del chrom_segmentations_A
-    del chrom_segmentations_B
+    scores[CONSTITUTIVE] = dict((k, [0.0] * chrom_length) for k in states)
 
-    if verbose:
-        gc.collect()
-        echo('Done compressing into windows:', len(chrom_segmentations_windows), 'unique windows:', len(unique_windows))
+    if constitutive_only:
+        closest_state = {}
+    else:
+        closest_state = dict((g, [None] * chrom_length) for g in groups)
 
-    chrom_length = len(chrom_segmentations_windows)
-    scores = [None] * chrom_length # dict((k, [0.0] * chrom_length) for k in [OVERALL_SCORE] + (states if compute_per_state_scores else []))
-
-    scores_cache = [None] * len(unique_windows)
-
-    state_transitions = None
-    closest_transition_cache = None
-
-    if not background_chunk:
-        state_transitions = [None] * chrom_length
-        closest_transition_cache = [None] * len(unique_windows)
+    closest_state[CONSTITUTIVE] = [None] * chrom_length
 
     # return scores, state_transitions
     if use_posteriors:
@@ -159,79 +144,50 @@ def get_overall_and_per_state_diff_score(chrom,
     else:
         _get_prob_vector = get_prob_vector
 
-    for bin_idx, (window_idx, _) in enumerate(chrom_segmentations_windows):
+    all_summed_probs = dict((s, [0]) for s in states)
+    rest_summed_probs = dict((s, [0]) for s in states)
 
-        a_bins, b_bins, a_window, b_window = unique_windows[window_idx]
+    n_groups = len(groups)
 
-        if scores_cache[window_idx] is None:
-            cache_miss += 1
+    for bin_idx in xrange(chrom_length):
+        all_current_bins = [tuple(seg[bin_idx] for seg in chrom_segmentations[g]) for g in groups]
+        prob_vectors = [_get_prob_vector(bins, datasets[g], metric[g], states) for bins, g in izip(all_current_bins, groups)]
 
-            # get the posterior probabilities for group A by summing up the
-            # the probability vectors for each state
-            a_probs = _get_prob_vector(a_bins, datasets_A, metric_A, states)
+        for s in states:
+            all_summed_probs[s] = sum(p[s] for p in prob_vectors)
 
-            # same for group B
-            b_probs = _get_prob_vector(b_bins, datasets_B, metric_B, states)
+        if compute_per_state_scores:
+            for s in states:
+                scores[CONSTITUTIVE][s][bin_idx] = all_summed_probs[s]
 
-            a_window_probs = [_get_prob_vector(a_window[i * len(datasets_A):(i + 1) * len(datasets_A)], datasets_A, metric_A, states)
-                              for i in xrange(len(a_window) / len(datasets_A))]
+            closest_state[CONSTITUTIVE][bin_idx] = (min([(b, i) for i in xrange(n_groups)
+                                                        for b in all_current_bins[i]],
+                                               key=lambda (s, i): KL(prob_vectors[i], consistent_state_probs[groups[i]][s]))[0],
 
-            b_window_probs = [_get_prob_vector(b_window[i * len(datasets_B):(i + 1) * len(datasets_B)], datasets_B, metric_B, states)
-                              for i in xrange(len(b_window) / len(datasets_B))]
+                                                        [max(bins, key=lambda s: prob_vectors[i][s])
+                                                            for i, bins in enumerate(all_current_bins)])
+        if constitutive_only:
+            continue
 
-            score, (true_a_probs, true_b_probs, true_a_idx, true_b_idx) = max(
-                min([(symmetric_KL_divergence(a_probs, probs), (a_probs, probs, -1, b_probs_i))
-                     for b_probs_i, probs in enumerate(b_window_probs)]),
-                min([(symmetric_KL_divergence(probs, b_probs), (probs, b_probs, a_probs_i, -1))
-                     for a_probs_i, probs in enumerate(a_window_probs)]))
+        for g, g_prob, g_bins in izip(groups, prob_vectors, all_current_bins):
 
-            scores_dict = dict((k, 0) for k in [OVERALL_SCORE] + (states if compute_per_state_scores else []))
-            scores_dict[OVERALL_SCORE] = round(score, PRECISION)
+            if report_per_group_state_probabilities:
+                for s in states:
+                    scores[g][s][bin_idx] = g_prob[s]
 
-            if compute_per_state_scores:
-                for state in states:
-                    scores_dict[state] = round(true_a_probs[state] - true_b_probs[state], PRECISION)
+            else:
 
-                    if report_per_group_state_probabilities:
-                        scores_dict[args.group_A_label + '_' + state] = true_a_probs[state]
-                        scores_dict[args.group_B_label + '_' + state] = true_b_probs[state]
+                for s in states:
+                    rest_summed_probs[s] = (all_summed_probs[s] - g_prob[s]) / (n_groups - 1)
 
+                scores[g][OVERALL_SCORE][bin_idx] = symmetric_KL_divergence(g_prob, rest_summed_probs)
+                if compute_per_state_scores:
+                    for s in states:
+                        scores[g][s][bin_idx] = g_prob[s] - rest_summed_probs[s]
 
+            closest_state[g][bin_idx] = (min(g_bins, key=lambda s: KL(g_prob, consistent_state_probs[g][s])), g_bins)
 
-
-            if not background_chunk:
-
-                true_a_bins = set(a_bins if true_a_idx == -1 else a_window[true_a_idx * len(datasets_A):(true_a_idx + 1) * len(datasets_A)])
-                true_b_bins = set(b_bins if true_b_idx == -1 else b_window[true_b_idx * len(datasets_B):(true_b_idx + 1) * len(datasets_B)])
-
-                if use_posteriors:
-                    state_indices = range(len(states))
-                    true_a_bins = set(states[max(state_indices, key=lambda i: p[i])] for p in true_a_bins)
-                    true_b_bins = set(states[max(state_indices, key=lambda i: p[i])] for p in true_b_bins)
-
-                    a_bins = [states[max(state_indices, key=lambda i: p[i])] for p in a_bins]
-                    b_bins = [states[max(state_indices, key=lambda i: p[i])] for p in b_bins]
-
-                closest_state_A = min(true_a_bins, key=lambda s: KL(true_a_probs, consistent_state_probs[GROUP_A][s]))
-                closest_state_B = min(true_b_bins, key=lambda s: KL(true_b_probs, consistent_state_probs[GROUP_B][s]))
-
-                closest_transition_cache[window_idx] = (closest_state_A, closest_state_B, a_bins, b_bins)
-
-            scores_cache[window_idx] = scores_dict
-
-        else:
-            scores_dict = scores_cache[window_idx]
-
-        # compute the score between A and B
-        scores[bin_idx] = scores_dict
-
-        if not background_chunk:
-            state_transitions[bin_idx] = closest_transition_cache[window_idx]
-
-    if verbose:
-        echo(chrom_length, len(scores_cache), 100 * (cache_miss / float(chrom_length)), cache_miss)
-
-    return expand_non_overlapping_windows(chrom, scores, state_transitions, chrom_segmentations_windows, background_chunk)
+    return chrom, scores, closest_state
 
 
 
@@ -625,7 +581,7 @@ def compute_background_model(args,
         # print 'chrom lengths:'
         # print chrom_lengths
 
-        echo('Learning significance threshold by permuting histone marks at q-value:', fdr_threshold)
+        echo('Learning significance threshold by permuting histone marks for at p-value:', fdr_threshold)
 
         background_scores = compute_background_scores_by_shuffling_marks(args.chrom_hmm_binarized,
                                                                          group_A_segmentations.keys() + group_B_segmentations.keys(),
@@ -644,7 +600,7 @@ def compute_background_model(args,
                                                                          use_mean_distance_matrix=use_mean_distance_matrix)
 
     else:
-        echo('Learning significance threshold by permuting segmentations at q-value:', fdr_threshold)
+        echo('Learning significance threshold by permuting segmentations for at p-value:', fdr_threshold)
 
         background_scores = compute_background_scores_by_shuffling_segmentations(group_A_segmentations,
                                                                                  group_B_segmentations,
@@ -731,56 +687,66 @@ STATE_TRANSITIONS = 'state_transitions'
 def process_chromosome(out_prefix,
 
                        chrom,
-                       group_A_segmentations,
-                       metric_A,
-                       group_B_segmentations,
-                       metric_B,
+
+                       group_segmentations,
+                       metric,
+
                        states,
                        consistent_state_probs,
                        compute_per_state_scores,
                        max_min_window,
                        background_chunk=False,
                        use_posteriors=False,
-                       report_per_group_state_probabilities=False):
+                       report_per_group_state_probabilities=False,
+                       constitutive_only=False):
 
     echo('Processing:', chrom)
-    chrom, signal, state_transitions = get_overall_and_per_state_diff_score(chrom,
-                                                                            group_A_segmentations,
-                                                                            metric_A,
-                                                                            group_B_segmentations,
-                                                                            metric_B,
-                                                                            states,
-                                                                            consistent_state_probs,
-                                                                            compute_per_state_scores,
-                                                                            max_min_window,
-                                                                            background_chunk,
-                                                                            use_posteriors,
-                                                                            report_per_group_state_probabilities)
+    chrom, signal, closest_state = get_overall_and_per_state_diff_score(chrom,
 
-    if args.smooth:
-        echo('Smoothing:', chrom)
-        smooth_dict(signal)
+                                                                        group_segmentations,
+                                                                        metric,
+
+                                                                        states,
+                                                                        consistent_state_probs,
+                                                                        compute_per_state_scores,
+                                                                        max_min_window,
+                                                                        background_chunk,
+                                                                        use_posteriors,
+                                                                        report_per_group_state_probabilities,
+                                                                        constitutive_only)
 
     echo('Writing down pickle files:', chrom)
 
-    st_fname = out_prefix + '.' + chrom + '.' + STATE_TRANSITIONS + '.pickle'
-    with open(st_fname, 'w') as out_f:
-        pickle.dump(state_transitions, out_f, pickle.HIGHEST_PROTOCOL)
-
     pickle_fnames = {}
-    for score_type in signal:
-        pickle_fname = out_prefix + '.' + chrom + '.' + score_type + '.pickle'
-        pickle_fnames[score_type] = pickle_fname
+    st_fnames = {}
 
-        with open(pickle_fname, 'w') as out_f:
-            pickle.dump(signal[score_type], out_f, pickle.HIGHEST_PROTOCOL)
+    for group in signal:
+
+        if args.smooth:
+            echo('Smoothing:', group, chrom)
+            smooth_dict(signal[group])
+
+        st_fname = out_prefix + '.' + group + '.' + chrom + '.' + STATE_TRANSITIONS + '.pickle'
+        st_fnames[group] = st_fname
+
+        with open(st_fname, 'w') as out_f:
+            pickle.dump(closest_state[group], out_f, pickle.HIGHEST_PROTOCOL)
+
+        pickle_fnames[group] = {}
+        for score_type in signal[group]:
+            pickle_fname = out_prefix + '.' + group + '.' + chrom + '.' + score_type + '.pickle'
+            pickle_fnames[group][score_type] = pickle_fname
+
+            with open(pickle_fname, 'w') as out_f:
+                pickle.dump(signal[group][score_type], out_f, pickle.HIGHEST_PROTOCOL)
 
     echo('Done:', chrom)
 
-    return pickle_fnames, st_fname, chrom
+    return pickle_fnames, st_fnames, chrom
 
 
 def merge_output_files(out_prefix,
+                       group,
                        score_type,
                        score_fnames,
                        st_fnames,
@@ -789,15 +755,15 @@ def merge_output_files(out_prefix,
                        threshold,
                        skip_bed_files=False):
 
-    echo('Merging:', score_type)
-    wig_fname = out_prefix + '.' + re.sub(r'\W+', '_', score_type) + '.wig.gz'
-    bed_fname = out_prefix + '.' + re.sub(r'\W+', '_', score_type) + '.summary.bed.gz'
+    echo('Merging:', group, score_type)
+    wig_fname = out_prefix + '.' + group + '.' + re.sub(r'\W+', '_', score_type) + '.wig.gz'
+    bed_fname = out_prefix + '.' + group + '.' + re.sub(r'\W+', '_', score_type) + '.summary.bed.gz'
 
     for fname in [wig_fname, bed_fname]:
         if os.path.isfile(fname):
             os.unlink(fname)
 
-    echo('Reading pickle files:', score_type)
+    echo('Reading pickle files:', group, score_type)
 
     signal = {}
     state_transitions = {}
@@ -821,195 +787,167 @@ def merge_output_files(out_prefix,
         return True
 
     echo('Sorting scores')
+    sorted_scores_indexes = dict((c, 0) for c in signal)
+    sorted_scores = {}
+    for chrom in signal.keys():
+        sorted_scores[chrom] = sorted([(score, bin_no, state_transition)
+                                            for bin_no, (score, state_transition) in enumerate(izip(signal[chrom],
+                                                                                                    state_transitions[chrom]))],
+                                      key=lambda (score, bin_no, state_transition): (-score, bin_no))
 
-    bins_sorted_by_score = sorted([(chrom, bin_no)
-                                    for chrom in signal
-                                        for bin_no in xrange(len(signal[chrom]))],
-                           key=lambda (chrom, bin_no): (-signal[chrom][bin_no], chrom, bin_no))
-
+        del signal[chrom]
+        del state_transitions[chrom]
+    gc.collect()
     # sorted_scores = sorted([(score, chrom, bin_no, state_transition)
     #                                 for chrom in signal
     #                                     for bin_no, (score, state_transition) in enumerate(izip(signal[chrom],
     #                                                                                             state_transitions[chrom]))],
     #                        key=lambda (score, chrom, bin_no, state_transition): (-score, chrom, bin_no))
-    #
+
     echo('Writing sorted summary files for', score_type, ':', bed_fname)
 
     score_cache = {}
+    def get_score(chrom, sorted_scores, sorted_scores_indexes):
+        idx = sorted_scores_indexes[chrom]
+
+        if idx == len(sorted_scores[chrom]):
+            return None
+
+        sorted_scores_indexes[chrom] += 1
+        return sorted_scores[chrom][idx], chrom
+
+    chromosomes = sorted(sorted_scores)
+
+    c_scores = dict((chrom, get_score(chrom, sorted_scores, sorted_scores_indexes)) for chrom in chromosomes)
 
     with open_file(bed_fname, 'w') as out_f:
-        # for score, chrom, bin_no, (closest_state_A, closest_state_B, a_states, b_states) in sorted_scores:
-        for chrom, bin_no in bins_sorted_by_score:
-            score = signal[chrom][bin_no]
-            (closest_state_A, closest_state_B, a_states, b_states) = state_transitions[chrom][bin_no]
+        while len(c_scores) > 0:
+            (score, bin_no, (closest_state, all_states)), chrom = max(c_scores.itervalues())
 
+        # for score, chrom, bin_no, (closest_state_A, closest_state_B, a_states, b_states) in sorted_scores:
             out_f.write('%s\t%d\t%d\t.\t%lf\t.\t%s\t%s\t%lf\t%s\n' %
                         (chrom,
                          bin_no * BIN_SIZE,
                          (bin_no + 1) * BIN_SIZE,
                          score,
 
-                         closest_state_A + '-' + closest_state_B,
-                         ','.join(a_states) + '/' + ','.join(b_states),
+                         closest_state,
+                         ','.join(all_states),
                          get_FDR(abs(score), score_background_model, score_cache),
                          '1' if threshold is not None and abs(score) >= threshold else '0'))
+            new_score = get_score(chrom, sorted_scores, sorted_scores_indexes)
+            if new_score is None:
+                del c_scores[chrom]
+            else:
+                c_scores[chrom] = new_score
 
     gc.collect()
 
     echo('Done:', score_type)
     return True
 
-# def merge_output_files(out_prefix,
-#                        score_type,
-#                        score_fnames,
-#                        st_fnames,
-#                        BIN_SIZE,
-#                        score_background_model,
-#                        threshold,
-#                        skip_bed_files=False):
-#
-#     echo('Merging:', score_type)
-#     wig_fname = out_prefix + '.' + re.sub(r'\W+', '_', score_type) + '.wig.gz'
-#     bed_fname = out_prefix + '.' + re.sub(r'\W+', '_', score_type) + '.summary.bed.gz'
-#
-#     for fname in [wig_fname, bed_fname]:
-#         if os.path.isfile(fname):
-#             os.unlink(fname)
-#
-#     echo('Reading pickle files:', score_type)
-#
-#     signal = {}
-#     state_transitions = {}
-#
-#     for chrom in score_fnames:
-#         with open(score_fnames[chrom]) as in_f:
-#             signal[chrom] = pickle.load(in_f)
-#         os.unlink(score_fnames[chrom])
-#
-#         with open(st_fnames[chrom]) as in_f:
-#             state_transitions[chrom] = pickle.load(in_f)
-#
-#     echo('Writing down wig file:', wig_fname)
-#     with open_file(wig_fname, 'w') as out_f:
-#         title = os.path.split(out_prefix)[1].replace('.wig', '').replace('.gz', '') + ' ' + score_type
-#         out_f.write('track type=wiggle_0 name="%s" description="%s"\n' % (title, title))
-#         for chrom in sorted(signal):
-#             store_wig(chrom, signal[chrom], out_f, BIN_SIZE)
-#
-#     if skip_bed_files:
-#         return True
-#
-#     echo('Sorting scores')
-#     sorted_scores_indexes = dict((c, 0) for c in signal)
-#     sorted_scores = {}
-#     for chrom in signal.keys():
-#         sorted_scores[chrom] = sorted([(score, bin_no, state_transition)
-#                                             for bin_no, (score, state_transition) in enumerate(izip(signal[chrom],
-#                                                                                                     state_transitions[chrom]))],
-#                                       key=lambda (score, bin_no, state_transition): (-score, bin_no))
-#
-#         del signal[chrom]
-#         del state_transitions[chrom]
-#     gc.collect()
-#     # sorted_scores = sorted([(score, chrom, bin_no, state_transition)
-#     #                                 for chrom in signal
-#     #                                     for bin_no, (score, state_transition) in enumerate(izip(signal[chrom],
-#     #                                                                                             state_transitions[chrom]))],
-#     #                        key=lambda (score, chrom, bin_no, state_transition): (-score, chrom, bin_no))
-#
-#     echo('Writing sorted summary files for', score_type, ':', bed_fname)
-#
-#     score_cache = {}
-#     def get_score(chrom, sorted_scores, sorted_scores_indexes):
-#         idx = sorted_scores_indexes[chrom]
-#
-#         if idx == len(sorted_scores[chrom]):
-#             return None
-#
-#         sorted_scores_indexes[chrom] += 1
-#         return sorted_scores[chrom][idx], chrom
-#
-#     chromosomes = sorted(sorted_scores)
-#
-#     c_scores = dict((chrom, get_score(chrom, sorted_scores, sorted_scores_indexes)) for chrom in chromosomes)
-#
-#     with open_file(bed_fname, 'w') as out_f:
-#         while len(c_scores) > 0:
-#             (score, bin_no, (closest_state_A, closest_state_B, a_states, b_states)), chrom = max(c_scores.itervalues())
-#
-#         # for score, chrom, bin_no, (closest_state_A, closest_state_B, a_states, b_states) in sorted_scores:
-#             out_f.write('%s\t%d\t%d\t.\t%lf\t.\t%s\t%s\t%lf\t%s\n' %
-#                         (chrom,
-#                          bin_no * BIN_SIZE,
-#                          (bin_no + 1) * BIN_SIZE,
-#                          score,
-#
-#                          closest_state_A + '-' + closest_state_B,
-#                          ','.join(a_states) + '/' + ','.join(b_states),
-#                          get_FDR(abs(score), score_background_model, score_cache),
-#                          '1' if threshold is not None and abs(score) >= threshold else '0'))
-#
-#             new_score = get_score(chrom, sorted_scores, sorted_scores_indexes)
-#             if new_score is None:
-#                 del c_scores[chrom]
-#             else:
-#                 c_scores[chrom] = new_score
-#
-#     gc.collect()
-#
-#     echo('Done:', score_type)
-#     return True
+
+def _compute_average_metric(metric, states):
+    average_metric = dict((s1, dict((s2, 0) for s2 in states)) for s1 in states)
+
+    total_groups = len(metric)
+
+    for g in metric:
+        group_average_metric = dict((s1, dict((s2, 0) for s2 in states)) for s1 in states)
+        m = metric[g]
+        for d in m:
+            for s1 in m[d]:
+                for s2 in m[d][s1]:
+                    group_average_metric[s1][s2] += m[d][s1][s2]
+
+        for s1 in group_average_metric:
+            for s2 in group_average_metric[s1]:
+                average_metric[s1][s2] += group_average_metric[s1][s2] / len(metric[g])
+
+    average_metric = dict((s1, dict((s2, average_metric[s1][s2] / total_groups) for s2 in states)) for s1 in states)
+
+    return dict((g, dict((d, average_metric) for d in metric[g])) for g in metric)
+
+
+def average_distribution(distributions, states):
+    avg_dist = dict((s, 0) for s in states)
+    n = 0
+    for d in distributions:
+        n += 1
+        for s in d:
+            avg_dist[s] += d[s]
+
+    for s in avg_dist:
+        avg_dist[s] /= n
+
+    return avg_dist
+
+
+def _print_consistent_state_transition_scores(states, metric_A, metric_B):
+    to_print = '\nRaw' + '\n'
+    to_print += '\t'.join(['State'] + states) + '\n'
+    for s1 in states:
+        a_probs = get_prob_vector([s1 for _ in metric_A], metric_A.keys(), metric_A, states)
+        to_print += '\t'.join([s1] + [str(symmetric_KL_divergence(
+                                            a_probs,
+                                            average_distribution(
+                                                (get_prob_vector([s2 for _ in metric_B[g]],
+                                                                 metric_B[g].keys(),
+                                                                 metric_B[g],
+                                                                 states) for g in metric_B),
+                                                states)))
+                                for s2 in states]) + '\n'
+
+    echo(to_print)
+
+
+def _generate_consistent_state_probabilities(states, metric):
+
+    consistent_state_probs = {}
+
+    for g in metric:
+        consistent_state_probs[g] = {}
+        for s in states:
+            consistent_state_probs[g][s] = get_prob_vector([s for _ in metric[g]],
+                                                                       metric[g].keys(),
+                                                                       metric[g],
+                                                                       states)
+
+    return consistent_state_probs
+
 
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
 
-    parser.add_argument('-a', nargs='+', help='segmentation files of group A')
-    parser.add_argument('-b', nargs='+', help='segmentation files of group B')
-
-    parser.add_argument('-A', dest='A', help='text file with segmentation files of group A, one per line')
-    parser.add_argument('-B', dest='B', help='text file with segmentation files of group B, one per line')
+    parser.add_argument('-g', nargs='+', help='files with paths to segmentation files for all groups')
 
     parser.add_argument('--bin-size', type=int, help='Bin size, default: %(default)s', default=200)
-    parser.add_argument('-f', '--fdr-threshold', type=float, help='FDR threshold: %(default)s', default=0.05)
-
-    parser.add_argument('--group-A-label', help='label for group A', default=GROUP_A)
-    parser.add_argument('--group-B-label', help='label for group B', default=GROUP_B)
+    # parser.add_argument('-f', '--fdr-threshold', type=float, help='FDR threshold: %(default)s', default=0.01)
 
     parser.add_argument('-o', '--output', help='output prefix')
     # parser.add_argument('--background-scores', help='bacground_scores.pickle')
 
-    parser.add_argument('--chrom-hmm-binarized', help='path to ChromHMM binarized files to compute background scores')
-    parser.add_argument('--chrom-hmm-model-path', help='path to the ChromHMM model to use for shuffled marks')
+    # parser.add_argument('--chrom-hmm-binarized', help='path to ChromHMM binarized files to compute background scores')
+    # parser.add_argument('--chrom-hmm-model-path', help='path to the ChromHMM model to use for shuffled marks')
 
-    parser.add_argument('--posteriors-dir', dest='posteriors_dir', help='posteriors directory from ChromHMM '
-                                                                        '(scores will be computed by '
+    parser.add_argument('--posteriors-dir', dest='posteriors_dir', help='posteriors directory from ChromHMM (scores will be computed by'
                                                                         'taking into account the posteriors')
-
-    parser.add_argument('--background-model', dest='background_model', help='Pickle file with previously '
-                                                                            'computed background model')
 
     parser.add_argument('-s', '--smooth', action='store_true', help='smooth signal')
     parser.add_argument('-p', '--n-threads', type=int, help='number of threads to use', default=1)
 
     parser.add_argument('--max-min-window', type=int, help='pick the maximum distance between the two most similar bins within this window', default=0)
 
-    parser.add_argument('--filter-chromosomes', nargs='+', dest='filter_chroms',
-                        help='Apply method only on these chromosomes. Default: use all chromosomes',
-                        default=None)
-
     parser.add_argument('--per-state-scores', action='store_true', help='compute per state scores', default=False)
+    parser.add_argument('--constitutive-only', action='store_true', help='constitutive scores only', default=False)
     parser.add_argument('--report-per-group-state-probabilities', action='store_true', help='output the probabilities for each state in each group per state scores', default=False)
     parser.add_argument('--skip-bed-files', action='store_true', help='output only wiggle files', default=False)
+
     parser.add_argument('--use-mean-distance-matrix', action='store_true',
                         help='Use one distance matrix for all samples computed as the average distance between each '
                              'pair of states',
                         default=False)
-
-    # parser.add_argument('--use-closest-rep', action='store_true', help='use only closest replicate to learn the metric')
-    # parser.add_argument('--all-for-null', action='store_true', default=False, help='include the original combo in the background model')
-    # parser.add_argument('--store-scores', action='store_true', default=False, help='store foreground and background scores in a pickle file')
-    # parser.add_argument('--output-changes', action='store_true', default=False, help='output significant pairwise changes')
 
     args = parser.parse_args()
 
@@ -1030,32 +968,24 @@ if __name__ == '__main__':
 
     compute_per_state_scores = args.per_state_scores
 
-    if args.A:
-        seg_A_fnames = [os.path.join(os.path.split(args.A)[0], l.strip()) for l in open_file(args.A)]
-    else:
-        seg_A_fnames = args.a
+    get_seg_fnames = lambda fname: [os.path.join(os.path.split(fname)[0], l.strip()) for l in open_file(fname).readlines()]
 
-    if args.B:
-        seg_B_fnames = [os.path.join(os.path.split(args.B)[0], l.strip()) for l in open_file(args.B)]
-    else:
-        seg_B_fnames = args.b
+    group_segmentations = {}
 
-    group_A_segmentations, states_A = read_segmentations(seg_A_fnames)
-    group_B_segmentations, states_B = read_segmentations(seg_B_fnames)
+    states = None
+    for g in args.g:
+        echo('Group:', g)
+        segs, states = read_segmentations(get_seg_fnames(g))
+        group_segmentations[os.path.split(g)[1].replace('.seg_files', '').replace('.segmentations', '')] = segs
 
-    states = sorted(set(states_A) | set(states_B), key=state_key)
+    chromosomes = sorted(reduce(operator.and_, [set(s.keys())
+                                             for segs in group_segmentations.values()
+                                             for s in segs.values()]),
+                         key=lambda c: int(c.replace('chr','')) if re.search(r'^chr(\d+)$', c) else 100)
 
-    if args.filter_chroms is not None:
-        chromosomes = args.filter_chroms
-        echo('Using chromosomes:', chromosomes)
-    else:
-        chromosomes = sorted(reduce(operator.and_, [set(s.keys())
-                                                 for segs in [group_A_segmentations, group_B_segmentations]
-                                                    for s in segs.values()]),
-                                    key=lambda c: int(c.replace('chr','')) if re.search(r'^chr(\d+)$', c) else 100)
+    # chromosomes = ['chr22']
     # print chromosomes
-    group_A_segmentations = filter_chroms(group_A_segmentations, chromosomes)
-    group_B_segmentations = filter_chroms(group_B_segmentations, chromosomes)
+    group_segmentations = dict((g, filter_chroms(group_segmentations[g], chromosomes)) for g in group_segmentations)
 
     # print 'A'
     # metric_A = learn_metric_from_all_replicates_test(group_A_segmentations, states, BIN_SIZE, posteriors_dir)
@@ -1063,54 +993,57 @@ if __name__ == '__main__':
     # metric_B = learn_metric_from_all_replicates_test(group_B_segmentations, states, BIN_SIZE, posteriors_dir)
     # exit(1)
 
-    metric_A = learn_metric_from_all_replicates(group_A_segmentations, states, BIN_SIZE, posteriors_dir)
-    metric_B = learn_metric_from_all_replicates(group_B_segmentations, states, BIN_SIZE, posteriors_dir)
+    metric = dict((g, learn_metric_from_all_replicates(group_segmentations[g],
+                                                         states,
+                                                         BIN_SIZE,
+                                                         posteriors_dir))
+                    for g in group_segmentations if len(group_segmentations[g]) > 1)
+
+    average_metric = _compute_average_metric(metric, states)
 
     if use_mean_distance_matrix:
-        metric_A, metric_B = compute_average_metric(metric_A, metric_B, states)
+        metric = average_metric
+    else:
+        single_avg_metric = average_metric.values()[0].values()[0]
+        for g in group_segmentations:
+            if len(group_segmentations[g]) == 1:
+                fname = group_segmentations[g].keys()[0]
+                metric[g] = {fname: single_avg_metric}
 
-    echo('Metric A')
-    print_metric(metric_A)
+    echo('Metrics')
+    for g in metric:
+        echo('Group:', g)
+        print_metric(metric[g])
 
-    echo('Metric B')
-    print_metric(metric_B)
+    # _print_consistent_state_transition_scores(states, metric_A, metric_B)
 
-    print_consistent_state_transition_scores(states, metric_A, metric_B)
-
-    fdr_threshold = args.fdr_threshold
+    # fdr_threshold = args.fdr_threshold
 
     out_fname = args.output
 
     score_types = [OVERALL_SCORE] + (states if compute_per_state_scores else [])
-    if args.fdr_threshold < 1:
-        if args.background_model is not None:
-            background_model, background_threshold = pickle.load(open(args.background_model))
-        else:
-            background_model, background_threshold = compute_background_model(args,
-                                                                              fdr_threshold,
-                                                                              group_A_segmentations,
-                                                                              metric_A,
-                                                                              group_B_segmentations,
-                                                                              metric_B,
-                                                                              states,
-                                                                              posteriors_dir,
-                                                                              use_mean_distance_matrix)
+    # if args.fdr_threshold < 1:
+    #     background_model, background_threshold = compute_background_model(args,
+    #                                                                       fdr_threshold,
+    #                                                                       group_A_segmentations,
+    #                                                                       metric_A,
+    #                                                                       group_B_segmentations,
+    #                                                                       metric_B,
+    #                                                                       states,
+    #                                                                       posteriors_dir,
+    #                                                                       use_mean_distance_matrix)
+    #     gc.collect()
+    # else:
+    #     echo('Skipping null model computations')
 
-            with open(out_fname + '.background_model.pickle', 'w') as out_f:
-                echo('Saving background model in:', out_fname + '.background_model.pickle')
-                pickle.dump((background_model, background_threshold), out_f, pickle.HIGHEST_PROTOCOL)
-
-        gc.collect()
-    else:
-        echo('Skipping null model computations')
-        background_model = dict((s, [(0, 0)]) for s in score_types)
-        background_threshold = dict((s, 0) for s in score_types)
+    background_model = dict((s, [(0, 0)]) for s in score_types)
+    background_threshold = dict((s, 0) for s in score_types)
 
     real_scores = {}
     real_state_transitions = {}
     echo('Computing real scores')
 
-    consistent_state_probs = generate_consistent_state_probabilities(states, metric_A, metric_B)
+    consistent_state_probs = _generate_consistent_state_probabilities(states, metric)
     # chromosomes = chromosomes # ['chr1', 'chr2', 'chrM', 'chrY']
     if args.n_threads > 1:
         pool = Pool(args.n_threads)
@@ -1118,54 +1051,65 @@ if __name__ == '__main__':
 
     score_fnames = {}
     st_fnames = {}
-
     for pickle_fnames, st_fname, chrom in _map(worker,
                                                  ((process_chromosome,
 
                                                    out_fname,
                                                    _chrom,
-                                                   dict((d, chrom_segmentation_to_list(group_A_segmentations[d][_chrom], BIN_SIZE)
+
+                                                   dict((g,
+                                                         dict((d, chrom_segmentation_to_list(group_segmentations[g][d][_chrom], BIN_SIZE)
                                                                  if posteriors_dir is None else
-                                                            read_posteriors_as_list(get_chrom_posteriors_fname(posteriors_dir, d, _chrom))
-                                                         )
-                                                        for d in group_A_segmentations),
-                                                   metric_A,
-                                                   dict((d, chrom_segmentation_to_list(group_B_segmentations[d][_chrom], BIN_SIZE)
-                                                                 if posteriors_dir is None else
-                                                            read_posteriors_as_list(get_chrom_posteriors_fname(posteriors_dir, d, _chrom))
-                                                        )
-                                                        for d in group_B_segmentations),
-                                                   metric_B,
+                                                               read_posteriors_as_list(get_chrom_posteriors_fname(posteriors_dir, d, _chrom)))
+                                                        for d in group_segmentations[g])) for g in group_segmentations),
+
+                                                   metric,
+
                                                    states,
                                                    consistent_state_probs,
                                                    compute_per_state_scores,
                                                    max_min_window,
                                                    False,
                                                    (posteriors_dir is not None),
-                                                   args.report_per_group_state_probabilities) for _chrom in chromosomes)):
+                                                   args.report_per_group_state_probabilities,
+                                                   args.constitutive_only) for _chrom in chromosomes)):
 
-        st_fnames[chrom] = st_fname
-        for score_type in pickle_fnames:
-            if score_type not in score_fnames:
-                score_fnames[score_type] = {}
+        for group in pickle_fnames:
 
-            score_fnames[score_type][chrom] = pickle_fnames[score_type]
+            if group not in st_fnames:
+                st_fnames[group] = {}
 
+            st_fnames[group][chrom] = st_fname[group]
+
+            if group not in score_fnames:
+                score_fnames[group] = {}
+
+            for score_type in pickle_fnames[group]:
+                if score_type not in score_fnames[group]:
+                    score_fnames[group][score_type] = {}
+
+                score_fnames[group][score_type][chrom] = pickle_fnames[group][score_type]
+
+    # print score_fnames
+    # print st_fnames
 
     all(_map(worker, ((merge_output_files,
                        out_fname,
+                       group,
                        score_type,
-                       score_fnames[score_type],
-                       st_fnames,
+                       score_fnames[group][score_type],
+                       st_fnames[group],
                        BIN_SIZE,
                        background_model.get(score_type, [(0, 0)]),
                        background_threshold.get(score_type, None),
                        args.skip_bed_files
-                       ) for score_type in score_fnames)))
+                       ) for group in score_fnames
+                            for score_type in score_fnames[group])))
 
     # delete pickled state transition files
-    for fname in st_fnames.values():
-        os.unlink(fname)
+    for group in st_fnames:
+        for fname in st_fnames[group].values():
+            os.unlink(fname)
 
     if args.n_threads > 1:
         pool.close()
