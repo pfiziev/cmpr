@@ -77,6 +77,7 @@ def learn_metric_from_all_replicates(segmentations, states, BIN_SIZE, posteriors
 
             key = (dataset, rep_dataset)
             if key not in metric_cache:
+
                 _metric = dict((s1, dict((s2, 0) for s2 in states)) for s1 in states)
 
                 seg1 = segmentations[dataset]
@@ -84,6 +85,7 @@ def learn_metric_from_all_replicates(segmentations, states, BIN_SIZE, posteriors
                 for chrom in seg1:
                     for s1, s2 in izip(iterstate(seg1[chrom], BIN_SIZE), iterstate(seg2[chrom], BIN_SIZE)):
                         _metric[s1][s2] += 1
+
                 metric_cache[key] = _metric
 
             for s1 in metric:
@@ -98,6 +100,174 @@ def learn_metric_from_all_replicates(segmentations, states, BIN_SIZE, posteriors
         metrics[dataset] = metric
 
     return metrics
+
+def log(v):
+    return math.log(v)
+
+class UnderflowException(Exception):
+    pass
+
+def convert_and_normalize_log_posteriors(log_posteriors):
+    # normalize all state posteriors to sum to one
+    # find the maximum posterior
+    max_log_posterior = max(log_posteriors)
+
+    # calculate the ratios between all other posteriors and the maximum posterior
+    posterior_ratios = [math.e ** (log_post - max_log_posterior) for log_post in log_posteriors]
+
+    total_posterior_ratios = sum(posterior_ratios)
+
+    # in case of underflow return a uniform distribution
+    if total_posterior_ratios == 0 or math.isinf(1. / total_posterior_ratios):
+        raise UnderflowException
+
+    # calculate the maximum rescaled posterior
+    max_posterior = 1. / total_posterior_ratios
+
+    # rescale cluster posteriors to sum to one
+    rescaled_posteriors = [max_posterior * ratio for ratio in posterior_ratios]
+
+    return rescaled_posteriors
+
+
+INF = float('inf')
+
+
+def add_log_probs(log_X, log_Y):
+
+    if log_X == -INF:
+        return log_Y
+    elif log_Y == -INF:
+        return log_X
+
+    # swap them if log_Y is the bigger number
+    if log_X < log_Y:
+        log_X, log_Y = log_Y, log_X
+
+    to_add = log(1 + math.exp(log_Y - log_X))
+    if to_add == -INF or to_add == INF:
+        return log_X
+    else:
+        return log_X + to_add
+
+
+def compute_posteriors(priors, thetas, segmentations, states):
+
+    log_likelihood = -INF
+    n_states = len(states)
+    datasets = sorted(segmentations)
+
+    chromosomes = sorted(segmentations[datasets[0]])
+    chrom_lengths = dict((c, len(segmentations[datasets[0]][c])) for c in chromosomes)
+
+    posteriors = dict((c, [[0] * n_states for _ in xrange(chrom_lengths[c])]) for c in chromosomes)
+
+    for chrom in chromosomes:
+        for bin_idx in xrange(chrom_lengths[chrom]):
+            post = posteriors[chrom][bin_idx]
+            for state_idx in xrange(n_states):
+
+                post[state_idx] = log(priors[state_idx])
+
+                for d_idx, d in enumerate(datasets):
+                    post[state_idx] += log(thetas[d_idx][state_idx][segmentations[d][chrom][bin_idx]])
+
+                log_likelihood = add_log_probs(log_likelihood, post[state_idx])
+
+            for state_idx, p in enumerate(convert_and_normalize_log_posteriors(post)):
+                post[state_idx] = p
+
+    return log_likelihood, posteriors
+
+
+def learn_posterior_from_all_replicates(unfolded_segs, states, BIN_SIZE):
+
+    state_to_idx = dict((s, states.index(s)) for s in states)
+
+    segmentations = dict((d,
+                          dict((c,
+                                [state_to_idx[s] for s in iterstate(unfolded_segs[d][c], BIN_SIZE)])
+                               for c in unfolded_segs[d]))
+                         for d in unfolded_segs)
+
+    datasets = sorted(segmentations)
+
+    n_datasets = len(datasets)
+    n_states = len(states)
+
+    # model parameters
+
+    # initialize thetas with the metrics
+    metric = learn_metric_from_all_replicates(unfolded_segs, states, BIN_SIZE)
+
+    thetas = [[[metric[d][states[s1]][states[s2]]
+                for s2 in xrange(n_states)]
+                for s1 in xrange(n_states)]
+              for d in datasets]
+
+    # initialize priors with the average frequency of each state
+    priors = [0] * n_states
+    _total = 0
+    for d in segmentations:
+        for c in segmentations[d]:
+            for s in segmentations[d][c]:
+                priors[s] += 1
+                _total += 1
+
+    priors = [p / float(_total) for p in priors]
+
+    MAX_EM_ITERATIONS = 100
+    MIN_LL_DELTA = 10**-3
+    posteriors = None
+    prev_log_likelihood = None
+
+    a2s = lambda a: '\t'.join(['%.2lf' % (100 * p) for p in a])
+    m2s = lambda m: '\n'.join(a2s(r) for r in m)
+
+    for EM_iteration in xrange(MAX_EM_ITERATIONS):
+        echo('EM iteration:', EM_iteration)
+        echo('Model:\n' +
+             'Priors=\n' + a2s(priors) + '\n\n' +
+             'Thetas= \n' + '\n\n'.join(m2s(t) for t in thetas))
+
+        log_likelihood, posteriors = compute_posteriors(priors, thetas, segmentations, states)
+
+        if prev_log_likelihood is not None and log_likelihood - prev_log_likelihood < MIN_LL_DELTA:
+            break
+
+        echo('Current LL:', log_likelihood)
+
+        if prev_log_likelihood is not None:
+            echo('Delta LL:', log_likelihood - prev_log_likelihood)
+
+        prev_log_likelihood = log_likelihood
+
+        new_priors = [0] * n_states
+        new_thetas = [matrix(n_states, n_states) for d in datasets]
+
+        for chrom in posteriors:
+
+            for bin_idx, post in enumerate(posteriors[chrom]):
+                for state_idx in xrange(n_states):
+
+                    new_priors[state_idx] += post[state_idx]
+                    for d_idx, d in enumerate(datasets):
+
+                        new_thetas[d_idx][state_idx][segmentations[d][chrom][bin_idx]] += post[state_idx]
+
+        total_p = sum(new_priors)
+        new_priors = [p / total_p for p in new_priors]
+        for d_idx in xrange(n_datasets):
+            for state_idx in xrange(n_states):
+                total_p = sum(new_thetas[d_idx][state_idx])
+                new_thetas[d_idx][state_idx] = [p / total_p for p in new_thetas[d_idx][state_idx]]
+
+        priors = new_priors
+        thetas = new_thetas
+
+        gc.collect()
+
+    return posteriors
 
 
 def compute_average_metric(metric_A, metric_B, states):

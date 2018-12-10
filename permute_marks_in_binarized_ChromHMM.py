@@ -8,7 +8,7 @@ import tempfile
 import operator
 import re
 import gc
-from chrom_compare import get_overall_and_per_state_diff_score, worker
+from ChromDelta import get_overall_and_per_state_diff_score, worker
 from metric import *
 from utils import echo, read_segmentations, filter_chroms, smooth
 from subprocess import call
@@ -264,7 +264,8 @@ def compute_background_scores_by_shuffling_marks( bin_directory,
                                                   to_smooth=False,
                                                   use_posteriors=False,
                                                   n_threads=1,
-                                                  use_mean_distance_matrix=False):
+                                                  use_mean_distance_matrix=False,
+                                                  keep_max_scores_per_bin=False):
 
     ct_chrom_fnames = {}
     celltypes = set(get_celltype(sf) for sf in seg_fnames)
@@ -341,7 +342,8 @@ def compute_background_scores_by_shuffling_marks( bin_directory,
                                                       max_min_window,
                                                       to_smooth,
                                                       use_posteriors,
-                                                      use_mean_distance_matrix)
+                                                      use_mean_distance_matrix,
+                                                      keep_max_scores_per_bin)
 
                                                     for ps_idx, permutations_subset
                                                             in enumerate(chunks(permutations,
@@ -393,7 +395,8 @@ def process_a_set_of_marks_permutation(ps_idx,
                                        max_min_window,
                                        to_smooth,
                                        use_posteriors,
-                                       use_mean_distance_matrix):
+                                       use_mean_distance_matrix,
+                                       keep_max_scores_per_bin):
 
     background_model = new_score_dict(states, compute_per_state_scores)
 
@@ -417,7 +420,8 @@ def process_a_set_of_marks_permutation(ps_idx,
                                                             max_min_window,
                                                             to_smooth,
                                                             use_posteriors,
-                                                            use_mean_distance_matrix)
+                                                            use_mean_distance_matrix,
+                                                            keep_max_scores_per_bin)
         for score_type in combo_background_scores:
             for s in combo_background_scores[score_type]:
                 if s not in background_model[score_type]:
@@ -448,7 +452,8 @@ def process_marks_permutation(perm,
                               max_min_window,
                               to_smooth,
                               use_posteriors,
-                              use_mean_distance_matrix):
+                              use_mean_distance_matrix,
+                              keep_max_scores_per_bin):
 
     # echo('Combo:', perm_no)
     echo(perm)
@@ -502,7 +507,8 @@ def process_marks_permutation(perm,
                                    max_min_window,
                                    to_smooth,
                                    use_posteriors,
-                                   use_mean_distance_matrix)
+                                   use_mean_distance_matrix,
+                                   keep_max_scores_per_bin)
 
     echo('Purging temp directory:', out_dir)
     shutil.rmtree(out_dir)
@@ -533,7 +539,8 @@ def process_shuffled_segmentations(states,
                                    max_min_window,
                                    to_smooth=False,
                                    use_posteriors=False,
-                                   use_mean_distance_matrix=False):
+                                   use_mean_distance_matrix=False,
+                                   keep_max_scores_per_bin=False):
 
     seg_fnames = sorted([os.path.join(out_dir, f) for f in os.listdir(out_dir) if f.endswith('_segments.bed')])
 
@@ -583,7 +590,8 @@ def process_shuffled_segmentations(states,
                                                             compute_per_state_scores,
                                                             max_min_window,
                                                             background_chunk=True,
-                                                            use_posteriors=use_posteriors)
+                                                            use_posteriors=use_posteriors,
+                                                            keep_max_scores_per_bin=keep_max_scores_per_bin)
         echo('Keys:', sorted(chunk_scores.keys()))
         if to_smooth:
             smooth_dict(chunk_scores)   # chunk_scores = dict((score_type, smooth(chunk_scores[score_type])) for score_type in chunk_scores)

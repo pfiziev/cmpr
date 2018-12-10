@@ -5,7 +5,7 @@ import os
 import random
 import sys
 import operator
-import pickle
+import cPickle as pickle
 import itertools
 import gc
 import traceback
@@ -1063,19 +1063,19 @@ if __name__ == '__main__':
     # metric_B = learn_metric_from_all_replicates_test(group_B_segmentations, states, BIN_SIZE, posteriors_dir)
     # exit(1)
 
-    metric_A = learn_metric_from_all_replicates(group_A_segmentations, states, BIN_SIZE, posteriors_dir)
-    metric_B = learn_metric_from_all_replicates(group_B_segmentations, states, BIN_SIZE, posteriors_dir)
+    posteriors_A = learn_posterior_from_all_replicates(group_A_segmentations, states, BIN_SIZE)
+    posteriors_B = learn_posterior_from_all_replicates(group_B_segmentations, states, BIN_SIZE)
+    exit(1)
+    # if use_mean_distance_matrix:
+    #     metric_A, metric_B = compute_average_metric(metric_A, metric_B, states)
 
-    if use_mean_distance_matrix:
-        metric_A, metric_B = compute_average_metric(metric_A, metric_B, states)
+    # echo('Metric A')
+    # print_metric(metric_A)
+    #
+    # echo('Metric B')
+    # print_metric(metric_B)
 
-    echo('Metric A')
-    print_metric(metric_A)
-
-    echo('Metric B')
-    print_metric(metric_B)
-
-    print_consistent_state_transition_scores(states, metric_A, metric_B)
+    # print_consistent_state_transition_scores(states, metric_A, metric_B)
 
     fdr_threshold = args.fdr_threshold
 
@@ -1089,9 +1089,7 @@ if __name__ == '__main__':
             background_model, background_threshold = compute_background_model(args,
                                                                               fdr_threshold,
                                                                               group_A_segmentations,
-                                                                              metric_A,
                                                                               group_B_segmentations,
-                                                                              metric_B,
                                                                               states,
                                                                               posteriors_dir,
                                                                               use_mean_distance_matrix)
@@ -1110,7 +1108,7 @@ if __name__ == '__main__':
     real_state_transitions = {}
     echo('Computing real scores')
 
-    consistent_state_probs = generate_consistent_state_probabilities(states, metric_A, metric_B)
+    # consistent_state_probs = generate_consistent_state_probabilities(states, metric_A, metric_B)
     # chromosomes = chromosomes # ['chr1', 'chr2', 'chrM', 'chrY']
     if args.n_threads > 1:
         pool = Pool(args.n_threads)
@@ -1118,7 +1116,7 @@ if __name__ == '__main__':
 
     score_fnames = {}
     st_fnames = {}
-
+    exit(1)
     for pickle_fnames, st_fname, chrom in _map(worker,
                                                  ((process_chromosome,
 

@@ -15,10 +15,13 @@ import ctypes
 import random
 import gc
 
+import zlib
+
 random.seed(42)
 
 ROOT_DIR = os.path.split(__file__)[0]
 
+NO_SCORE = -1234567
 
 def error(msg):
     print >> sys.stderr, 'ERROR: %s' % msg
@@ -226,14 +229,14 @@ def median(array):
 def n_combinations(N, k):
     if (k > N) or (N < 0) or (k < 0):
         return 0L
-    N, k = map(long,(N,k))
+    N, k = map(long, (N,k))
     top = N
     val = 1L
-    while top > (N-k):
+    while top > (N - k):
         val *= top
         top -= 1
     n = 1L
-    while n < k+1L:
+    while n < k + 1L:
         val /= n
         n += 1
     return val
@@ -277,6 +280,9 @@ def smooth(wig_data, filter='gaussian', bandwidth=10):
         result[bin_idx] = round(result[bin_idx], PRECISION)
 
     return result
+
+
+
 
 
 def smooth_in_place(wig_data, filter='gaussian', bandwidth=10):
@@ -332,6 +338,40 @@ def read_segmentations(filenames):
                 states.add(state)
 
     return data, sorted(states, key=state_key)
+
+
+def read_segmentations_compressed(filenames):
+    data = {}
+    states = set()
+    chrom_lengths = {}
+
+    for fname in filenames:
+        data[fname] = {}
+        echo('Reading:', fname)
+
+        with open_file(fname) as in_f:
+
+            for line in in_f:
+                chrom, start, end, state = line.strip().split('\t')
+
+                if chrom not in data[fname]:
+                    data[fname][chrom] = []
+
+                data[fname][chrom].append('\t'.join([start, end, state]))
+
+                states.add(state)
+
+        for chrom in data[fname]:
+            c_len = int(data[fname][chrom][-1].split('\t')[1])
+
+            if chrom not in chrom_lengths:
+                chrom_lengths[chrom] = c_len
+            else:
+                chrom_lengths[chrom] = min(c_len, chrom_lengths[chrom])
+
+        data[fname] = dict((chrom, zlib.compress('\n'.join(data[fname][chrom]), 6)) for chrom in data[fname])
+
+    return data, sorted(states, key=state_key), chrom_lengths
 
 
 def filter_chroms(segmentations, chromosomes):
@@ -469,3 +509,7 @@ def chunks(array, chunk_size):
         chunk.append(el)
     if len(chunk) > 0:
         yield chunk
+
+
+def matrix(n, m):
+    return [[0.] * m for _ in xrange(n)]

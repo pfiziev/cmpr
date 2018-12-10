@@ -2,6 +2,7 @@ import argparse
 import gzip
 
 import sys
+import math
 
 def open_file(fname, mode='r'):
     return gzip.open(fname, mode) if fname.endswith('.gz') else open(fname, mode)
@@ -12,6 +13,15 @@ def iter_posteriors(fname):
         f.readline()
         for line in f:
             yield tuple(map(lambda v: round(float(v), 3), line.strip().split()))
+
+
+def entropy(d):
+    e = 0
+    for p in d.values():
+        if p > 0:
+            e -= p * math.log(p, 2)
+    return e
+
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
@@ -45,12 +55,14 @@ if __name__ == '__main__':
                 #     if posteriors[i] > 0:
                 #         for j, s2 in enumerate(states):
                 #             posterior_squared[s1][s2] += posteriors[i] * posteriors[j]
-    print '\t'.join(['state'] + states)
+    print '\t'.join(['state'] + states + ['Entropy'])
     for s1 in states:
         total = sum(posterior_squared[s1].values())
         print s1,
         for s2 in states:
             posterior_squared[s1][s2] /= total
             print '\t' + str(round(100 * posterior_squared[s1][s2], 2)),
-        print
+
+        print '\t' + '%.2lf' % (entropy(posterior_squared[s1]))
+
 

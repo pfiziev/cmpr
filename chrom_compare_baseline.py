@@ -245,7 +245,8 @@ def get_overall_and_per_state_diff_score_by_fishers_exact_test(chrom,
                                                                group_B_segmentations,
                                                                BIN_SIZE,
                                                                states,
-                                                               compute_per_state_scores):
+                                                               compute_per_state_scores,
+                                                               keep_max_scores=False):
 
     echo('Processing chromosome:', chrom)
     cache = dict((s, {}) for s in states)
@@ -278,9 +279,22 @@ def get_overall_and_per_state_diff_score_by_fishers_exact_test(chrom,
 
                 if key not in cache[state]:
                     odds_ratio, pval = fisher_exact([[a, b], [c, d]])
-                    cache[state][key] = -math.log(pval, 2) * sign(float(a) / (a + b) - float(c) / (c + d))
+                    score = -math.log(pval, 2) * sign(float(a) / (a + b) - float(c) / (c + d))
+
+                    if score == 0:
+                        score = 0.00001
+
+                    cache[state][key] = score
 
                 signal[state][bin_idx] = cache[state][key]
+
+            if keep_max_scores:
+                min_score_state = min(union, key=lambda s: signal[s][bin_idx])
+                max_score_state = max(union, key=lambda s: signal[s][bin_idx])
+
+                for state in union:
+                    if state not in [max_score_state, min_score_state]:
+                        signal[state][bin_idx] = 0
 
         state_transitions.append(('X', 'X', a_bins, b_bins))
 
@@ -422,7 +436,6 @@ def get_overall_and_per_state_diff_score_emissions(chrom,
     return expand_non_overlapping_windows(chrom, scores, state_transitions, chrom_segmentations_windows, background_chunk)
 
 
-
 def store_wig(chrom,
               signal,
               out_signal_f,
@@ -432,7 +445,7 @@ def store_wig(chrom,
 
     for bin_signal in signal:
 
-        out_signal_f.write('%.2lf\n' % bin_signal)
+        out_signal_f.write(str(bin_signal) + '\n')
 
 
 def store_dict_wig(chrom,
@@ -1099,7 +1112,6 @@ def get_celltype(fname):
     return re.sub(r'_(\d+)(_coreMarks)?$', '', os.path.split(fname)[1].split('_segments')[0])
 
 
-
 EMISSION_SCORES = 'emissions'
 MARK_SCORES = 'marks'
 POSTERIOR_SCORES = 'posteriors'
@@ -1136,7 +1148,9 @@ if __name__ == '__main__':
 
     parser.add_argument('--signal-dir', help='ChromHMM signal directory for euclidean distance of the signal')
     parser.add_argument('--log2rpkm', action='store_true', help='take log2 rpkm for signal delta', default=False)
+    parser.add_argument('--keep-max-scores', action='store_true', help='keep only the maximum score for each bin in each direction', default=False)
     parser.add_argument('--use_symmetric_KL', action='store_true', help='Use symmetric KL for posteriors delta, else Hellinger distance', default=False)
+    parser.add_argument('--skip-summary', action='store_true', help='Skip summary bed files', default=False)
 
     parser.add_argument('--posteriors-dir', help='ChromHMM posteriors directory for computing the difference based on posteriors only')
     parser.add_argument('--baseline', choices=[EMISSION_SCORES, MARK_SCORES, POSTERIOR_SCORES, STATE_COUNT, FISHER_EXACT], help='baseline type')
@@ -1168,6 +1182,9 @@ if __name__ == '__main__':
     max_min_window = args.max_min_window
 
     compute_per_state_scores = args.per_state_scores
+    keep_max_scores = args.keep_max_scores
+    if args.baseline != FISHER_EXACT and keep_max_scores:
+        error('--keep-max-scores is implemented only for Fisher exact test')
 
     if args.A:
         seg_A_fnames = [os.path.join(os.path.split(args.A)[0], l.strip()) for l in open_file(args.A)]
@@ -1293,7 +1310,8 @@ if __name__ == '__main__':
                                                         dict((d, {_chrom: group_B_segmentations[d][_chrom]}) for d in group_B_segmentations),
                                                         BIN_SIZE,
                                                         states,
-                                                        compute_per_state_scores
+                                                        compute_per_state_scores,
+                                                        keep_max_scores
                                                    ),
                                                    }[args.baseline] for _chrom in chromosomes]):
 
@@ -1319,58 +1337,61 @@ if __name__ == '__main__':
             for chrom in all_signal:
                 store_wig(chrom, all_signal[chrom][score_type], out_signal_file, BIN_SIZE)
 
-        echo('Writing sorted summary files for', score_type)
+        if not args.skip_summary:
+            echo('Writing sorted summary files for', score_type)
 
-        def write_line(out_f, chrom, bin_no, score, closest_state_A, closest_state_B, a_states, b_states, score_type, threshold, adjusted_pvalue='NA'):
-            out_f.write('\t'.join(map(str,
-                                      [ chrom,
-                                        bin_no * BIN_SIZE,
-                                        (bin_no + 1) * BIN_SIZE,
-                                        '.',
-                                        score,
-                                        '.',
-                                        closest_state_A + '-' + closest_state_B,
-                                        ','.join(a_states) + '/' + ','.join(b_states),
-                                        adjusted_pvalue, #get_FDR(abs(score), background_model, score_type),
-                                        '1' if score >= threshold else '0'])) + '\n')
+            def write_line(out_f, chrom, bin_no, score, closest_state_A, closest_state_B, a_states, b_states, score_type, threshold, adjusted_pvalue='NA'):
+                out_f.write('\t'.join(map(str,
+                                          [ chrom,
+                                            bin_no * BIN_SIZE,
+                                            (bin_no + 1) * BIN_SIZE,
+                                            '.',
+                                            score,
+                                            '.',
+                                            closest_state_A + '-' + closest_state_B,
+                                            ','.join(a_states) + '/' + ','.join(b_states),
+                                            adjusted_pvalue, #get_FDR(abs(score), background_model, score_type),
+                                            '1' if score >= threshold else '0'])) + '\n')
 
 
-        group_scores = [(score, chrom, bin_no, state_transition)
-                        for chrom in chromosomes
-                        for bin_no, (score, state_transition) in
-                        enumerate(izip(all_signal[chrom][score_type], all_transitions[chrom]))]
+            group_scores = [(score, chrom, bin_no, state_transition)
+                            for chrom in chromosomes
+                            for bin_no, (score, state_transition) in
+                            enumerate(izip(all_signal[chrom][score_type], all_transitions[chrom]))]
 
-        if score_type is OVERALL_SCORE:
-            sorted_scores = sorted(group_scores,
-                                   key=lambda (score, chrom, bin_no, state_transition): (-score, chrom, bin_no))
-            bed_out_fname = out_fname + '.' + re.sub(r'\W+', '_', score_type) + '.summary.bed.gz'
+            if score_type is OVERALL_SCORE:
+                sorted_scores = sorted(group_scores,
+                                       key=lambda (score, chrom, bin_no, state_transition): (-score, chrom, bin_no))
 
-        else:
-            sorted_scores = sorted(group_scores,
-                                  key=lambda (score, chrom, bin_no, state_transition): (score, chrom, bin_no))
-            bed_out_fname = out_fname + '.' + re.sub(r'\W+', '_', score_type) + '.both_groups.summary.bed.gz'
+                bed_out_fname = out_fname + '.' + re.sub(r'\W+', '_', score_type) + '.summary.bed.gz'
 
-        if args.baseline == FISHER_EXACT:
-            from statsmodels.sandbox.stats.multicomp import multipletests
-            echo('Computing adjusted p-values')
-            pvals = [2**(-abs(s)) for s, _, _, _ in sorted_scores]
-            _, adjusted_pvals, _, _ = multipletests(pvals, method='fdr_bh')
-        else:
-            adjusted_pvals = None
+            else:
+                sorted_scores = sorted(group_scores,
+                                      key=lambda (score, chrom, bin_no, state_transition): (score, chrom, bin_no))
 
-        with open_file(bed_out_fname, 'w') as out_f:
-            for score_idx, (score, chrom, bin_no, (closest_state_A, closest_state_B, a_states, b_states)) in enumerate(sorted_scores):
-                write_line(out_f,
-                           chrom,
-                           bin_no,
-                           score,
-                           closest_state_A,
-                           closest_state_B,
-                           a_states,
-                           b_states,
-                           score_type,
-                           0,
-                           adjusted_pvalue=adjusted_pvals[score_idx] if adjusted_pvals is not None else 'NA')
+                bed_out_fname = out_fname + '.' + re.sub(r'\W+', '_', score_type) + '.both_groups.summary.bed.gz'
+
+            if args.baseline == FISHER_EXACT:
+                from statsmodels.sandbox.stats.multicomp import multipletests
+                echo('Computing adjusted p-values')
+                pvals = [2**(-abs(s)) for s, _, _, _ in sorted_scores]
+                _, adjusted_pvals, _, _ = multipletests(pvals, method='fdr_bh')
+            else:
+                adjusted_pvals = None
+
+            with open_file(bed_out_fname, 'w') as out_f:
+                for score_idx, (score, chrom, bin_no, (closest_state_A, closest_state_B, a_states, b_states)) in enumerate(sorted_scores):
+                    write_line(out_f,
+                               chrom,
+                               bin_no,
+                               score,
+                               closest_state_A,
+                               closest_state_B,
+                               a_states,
+                               b_states,
+                               score_type,
+                               0,
+                               adjusted_pvalue=adjusted_pvals[score_idx] if adjusted_pvals is not None else 'NA')
         #
         # if score_type is OVERALL_SCORE:
         #     group_scores = [(score, chrom, bin_no, state_transition)
